@@ -1,0 +1,275 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/InfinitIQ-Tech/agent-config-spec/main/schema/agent-config.v2.schema.json",
+  "title": "AgentConfig",
+  "description": "Portable agent manifest (schema_version 2). A single snake_case JSON document that fully describes an agent: prompt, model strategy, runtime limits, memory, retrieval, tools, and guardrails. The same document may be stored by a control plane, checked into source control, or handed to an on-device runtime. Deployment topology, tenant identity, and provider API keys are outside the manifest: keys are always runtime-supplied and never appear in the artifact. Validators MUST accept unknown members (forward compatibility) and tooling MUST preserve them when loading, validating, or repackaging a manifest.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Stable agent identifier (slug)."
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable agent name."
+    },
+    "version": {
+      "type": "string",
+      "description": "Version label of this agent configuration (e.g. \"v2\"). Chosen by the author or publishing control plane; not the schema version."
+    },
+    "schema_version": {
+      "enum": ["2"],
+      "description": "Version of this manifest schema. This document describes schema_version \"2\"."
+    },
+    "system_prompt": {
+      "type": "string",
+      "description": "The agent's system prompt."
+    },
+    "description": {
+      "type": ["string", "null"],
+      "description": "Optional human-readable description."
+    },
+    "tags": {
+      "type": ["array", "null"],
+      "items": { "type": "string" },
+      "description": "Optional free-form tags."
+    },
+    "runtime": { "$ref": "#/$defs/AgentRuntimeConfig" },
+    "model": { "$ref": "#/$defs/AgentModelConfig" },
+    "memory": { "$ref": "#/$defs/AgentMemoryConfig" },
+    "retrieval": { "$ref": "#/$defs/AgentRetrievalConfig" },
+    "tools": { "$ref": "#/$defs/AgentToolsConfig" },
+    "guardrails": { "$ref": "#/$defs/AgentGuardrailsConfig" },
+    "output": { "$ref": "#/$defs/AgentOutputConfig" }
+  },
+  "required": ["id", "name", "version", "schema_version", "system_prompt", "runtime", "model"],
+  "$defs": {
+    "AgentRuntimeConfig": {
+      "type": "object",
+      "description": "Execution limits for the agent loop.",
+      "properties": {
+        "streaming": {
+          "type": "boolean",
+          "description": "Whether the runtime should stream responses."
+        },
+        "max_turns": {
+          "type": ["integer", "null"],
+          "description": "Maximum agent-loop turns per request. Null or absent means runtime default."
+        },
+        "max_concurrent_tools": {
+          "type": ["integer", "null"],
+          "description": "Maximum tool calls executed concurrently. Null or absent means runtime default."
+        }
+      },
+      "required": ["streaming"]
+    },
+    "AgentModelCandidate": {
+      "type": "object",
+      "description": "One model the agent may run on, as \"provider:model\" (e.g. \"openai:gpt-4o\", \"anthropic:claude-sonnet-5\", \"apple:foundation-models\").",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Candidate name, unique within the manifest (e.g. \"primary\")."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model reference in \"provider:model\" form. The runtime resolves the provider; keys are supplied at runtime, never in the manifest."
+        }
+      },
+      "required": ["name", "model"]
+    },
+    "AgentModelConfig": {
+      "type": "object",
+      "description": "Model selection strategy and candidates.",
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "description": "How the runtime picks among candidates (e.g. \"single\", \"weighted\", \"fallback\"). Runtimes treat unrecognized strategies as pass-through and may reject them at execution time."
+        },
+        "candidates": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/AgentModelCandidate" },
+          "description": "Candidate models the strategy selects from."
+        },
+        "routing_policy": {
+          "type": ["object", "null"],
+          "description": "Strategy-specific routing options (e.g. {\"sticky\": true}). Pass-through metadata for the runtime."
+        }
+      },
+      "required": ["strategy", "candidates"]
+    },
+    "AgentMemoryConfig": {
+      "type": "object",
+      "description": "Conversation memory policy.",
+      "properties": {
+        "type": {
+          "type": ["string", "null"],
+          "description": "Memory implementation (e.g. \"buffer\"). Null or absent means runtime default."
+        },
+        "window_turns": {
+          "type": ["integer", "null"],
+          "description": "How many turns the memory window retains."
+        }
+      }
+    },
+    "AgentRetrievalConfig": {
+      "type": "object",
+      "description": "Retrieval-augmented generation settings.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether retrieval is active for this agent."
+        },
+        "corpus_ids": {
+          "type": ["array", "null"],
+          "items": { "type": "string" },
+          "description": "Corpora to search. Identifiers are runtime-defined."
+        },
+        "top_k": {
+          "type": ["integer", "null"],
+          "description": "Number of documents to retrieve."
+        },
+        "rerank": {
+          "type": ["boolean", "null"],
+          "description": "Whether to rerank retrieved documents."
+        },
+        "filters": {
+          "type": ["object", "null"],
+          "description": "Retrieval filters (arbitrary JSON). Pass-through metadata for the runtime."
+        }
+      },
+      "required": ["enabled"]
+    },
+    "ToolEndpoint": {
+      "type": "object",
+      "description": "Optional HTTP execution endpoint for a tool. Tools without an endpoint are executed natively by the runtime or the host app.",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "Endpoint URL the runtime calls with the tool arguments."
+        },
+        "method": {
+          "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+          "description": "HTTP method. Defaults to POST when absent.",
+          "default": "POST"
+        },
+        "headers": {
+          "type": ["object", "null"],
+          "additionalProperties": { "type": "string" },
+          "description": "Static headers sent with each call. Secrets should be injected at runtime rather than stored here."
+        }
+      },
+      "required": ["url"]
+    },
+    "ToolDefinition": {
+      "type": "object",
+      "description": "An LLM-native tool schema, plus an optional execution endpoint.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Tool name the model calls."
+        },
+        "description": {
+          "type": "string",
+          "description": "What the tool does, written for the model."
+        },
+        "parameters": {
+          "type": "object",
+          "description": "JSON Schema object describing the tool's arguments."
+        },
+        "endpoint": {
+          "anyOf": [
+            { "$ref": "#/$defs/ToolEndpoint" },
+            { "type": "null" }
+          ],
+          "description": "Optional HTTP endpoint that executes the tool."
+        }
+      },
+      "required": ["name", "description", "parameters"]
+    },
+    "AgentToolPolicy": {
+      "type": "object",
+      "description": "Constraints on tool execution.",
+      "properties": {
+        "require_user_confirmation": {
+          "type": ["array", "null"],
+          "items": { "type": "string" },
+          "description": "Tool names that must be confirmed by the user before executing."
+        },
+        "max_total_runtime_ms": {
+          "type": ["integer", "null"],
+          "description": "Total tool-execution budget per turn, in milliseconds."
+        },
+        "max_tools_per_turn": {
+          "type": ["integer", "null"],
+          "description": "Maximum number of tool calls per turn."
+        }
+      }
+    },
+    "AgentToolsConfig": {
+      "type": "object",
+      "description": "Tool surface for the agent. `allowed` absent means no allow-list is declared; `allowed: []` is an explicit allow-list enabling no tools. A manifest may carry definitions without an allow-list; consumers apply their own normalization rather than inferring hidden built-in tools.",
+      "properties": {
+        "allowed": {
+          "type": ["array", "null"],
+          "items": { "type": "string" },
+          "description": "Ordered allow-list of tool names."
+        },
+        "definitions": {
+          "type": ["array", "null"],
+          "items": { "$ref": "#/$defs/ToolDefinition" },
+          "description": "Tool schemas available to the agent."
+        },
+        "tool_policy": {
+          "anyOf": [
+            { "$ref": "#/$defs/AgentToolPolicy" },
+            { "type": "null" }
+          ],
+          "description": "Execution constraints applied across all tools."
+        }
+      }
+    },
+    "AgentOutputFormat": {
+      "type": "object",
+      "description": "One per-turn response format. Mirrors the Anthropic Messages API output_config.format shape so runtimes can pass it through or map it to provider-native guided generation.",
+      "properties": {
+        "type": {
+          "enum": ["json_schema"],
+          "description": "Format discriminator. \"json_schema\" constrains each assistant turn's final payload to the declared JSON Schema."
+        },
+        "schema": {
+          "type": "object",
+          "description": "JSON Schema object the assistant turn's structured payload must conform to."
+        }
+      },
+      "required": ["type", "schema"]
+    },
+    "AgentOutputConfig": {
+      "type": "object",
+      "description": "Per-turn structured output declaration. Absent means unstructured text output (default behavior).",
+      "properties": {
+        "format": { "$ref": "#/$defs/AgentOutputFormat" }
+      },
+      "required": ["format"]
+    },
+    "AgentGuardrailsConfig": {
+      "type": "object",
+      "description": "Safety and content policy switches. Semantics are runtime-defined; unknown members are pass-through.",
+      "properties": {
+        "pii_redaction": {
+          "type": ["boolean", "null"],
+          "description": "Whether the runtime should redact PII."
+        },
+        "jailbreak_detection": {
+          "type": ["boolean", "null"],
+          "description": "Whether the runtime should screen for jailbreak attempts."
+        },
+        "blocked_topics": {
+          "type": ["array", "null"],
+          "items": { "type": "string" },
+          "description": "Topics the agent must refuse to engage with."
+        }
+      }
+    }
+  }
+}

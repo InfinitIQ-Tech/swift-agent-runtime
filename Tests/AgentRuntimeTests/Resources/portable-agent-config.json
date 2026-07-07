@@ -1,0 +1,113 @@
+{
+  "id": "support_agent",
+  "name": "Support Agent",
+  "version": "v2",
+  "schema_version": "2",
+  "system_prompt": "Use the published support workflow.",
+  "description": "Handles support questions",
+  "tags": [
+    "support",
+    "ga"
+  ],
+  "runtime": {
+    "streaming": true,
+    "max_turns": 8,
+    "max_concurrent_tools": 2
+  },
+  "model": {
+    "strategy": "single",
+    "candidates": [
+      {
+        "name": "primary",
+        "model": "openai:gpt-4o"
+      }
+    ],
+    "routing_policy": {
+      "sticky": true
+    }
+  },
+  "memory": {
+    "type": "buffer",
+    "window_turns": 12
+  },
+  "retrieval": {
+    "enabled": true,
+    "corpus_ids": [
+      "support-docs"
+    ],
+    "top_k": 4,
+    "rerank": true,
+    "filters": {
+      "lang": "en"
+    }
+  },
+  "tools": {
+    "allowed": [
+      "search",
+      "calculator"
+    ],
+    "definitions": [
+      {
+        "name": "search",
+        "description": "Searches the support corpus",
+        "parameters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "query"
+          ],
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          }
+        },
+        "endpoint": {
+          "url": "https://example.com/tool/search",
+          "method": "POST",
+          "headers": {
+            "Authorization": "Bearer token"
+          }
+        }
+      }
+    ],
+    "tool_policy": {
+      "require_user_confirmation": [
+        "search"
+      ],
+      "max_total_runtime_ms": 2000,
+      "max_tools_per_turn": 2
+    }
+  },
+  "guardrails": {
+    "pii_redaction": true,
+    "jailbreak_detection": true,
+    "blocked_topics": [
+      "payments"
+    ]
+  },
+  "output": {
+    "format": {
+      "type": "json_schema",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reply",
+          "choices"
+        ],
+        "properties": {
+          "reply": {
+            "type": "string"
+          },
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # Foundation Models code paths require the macOS 26 SDK (Xcode 26).
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Build (macOS)
+        run: swift build
+      - name: Test
+        run: swift test
+      - name: Build (iOS Simulator, iOS 17 floor)
+        run: xcodebuild -scheme AgentRuntime -destination "generic/platform=iOS Simulator" build
+      - name: Demo dry run (no backend, no network)
+        run: swift run agent-runtime-demo --manifest Manifests/story-companion.agentconfig.json --dry-run

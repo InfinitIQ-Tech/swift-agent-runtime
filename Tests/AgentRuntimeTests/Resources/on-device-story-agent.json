@@ -1,0 +1,76 @@
+{
+  "id": "story_companion",
+  "name": "Story Companion",
+  "version": "v1",
+  "schema_version": "2",
+  "system_prompt": "You are a friendly bedtime-story companion. Keep stories gentle, imaginative, and age-appropriate.",
+  "description": "On-device story companion running on Apple Foundation Models, with a cloud fallback",
+  "tags": [
+    "on-device",
+    "demo"
+  ],
+  "runtime": {
+    "streaming": true,
+    "max_turns": 6,
+    "max_concurrent_tools": 1
+  },
+  "model": {
+    "strategy": "fallback",
+    "candidates": [
+      {
+        "name": "on_device",
+        "model": "apple:foundation-models"
+      },
+      {
+        "name": "cloud",
+        "model": "anthropic:claude-haiku-4-5"
+      }
+    ],
+    "routing_policy": {
+      "prefer_on_device": true
+    }
+  },
+  "memory": {
+    "type": "buffer",
+    "window_turns": 10
+  },
+  "tools": {
+    "allowed": [
+      "save_story"
+    ],
+    "definitions": [
+      {
+        "name": "save_story",
+        "description": "Saves the finished story to the user's library",
+        "parameters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "title",
+            "body"
+          ],
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ],
+    "tool_policy": {
+      "require_user_confirmation": [],
+      "max_total_runtime_ms": 1000,
+      "max_tools_per_turn": 1
+    }
+  },
+  "guardrails": {
+    "pii_redaction": true,
+    "jailbreak_detection": false,
+    "blocked_topics": [
+      "violence"
+    ]
+  }
+}
