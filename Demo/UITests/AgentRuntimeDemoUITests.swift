@@ -13,7 +13,8 @@ final class AgentRuntimeDemoUITests: XCTestCase {
 
     private func waitForStatus(_ status: String, app: XCUIApplication) {
         let label = app.staticTexts["sessionStatus"]
-        let predicate = NSPredicate(format: "label == %@", status)
+        // AppKit static text exposes its content as value; UIKit uses label.
+        let predicate = NSPredicate(format: "label == %@ OR value == %@", status, status)
         expectation(for: predicate, evaluatedWith: label)
         waitForExpectations(timeout: 10)
     }
@@ -44,7 +45,9 @@ final class AgentRuntimeDemoUITests: XCTestCase {
         app.buttons["newConversation"].clickOrTap()
         waitForStatus("Ready", app: app)
         XCTAssertFalse(app.staticTexts["Simulated reply 6: turn 6"].exists)
-        XCTAssertEqual(app.staticTexts["remainingTurns"].label, "6 turns left")
+        let turns = app.staticTexts["remainingTurns"]
+        XCTAssertTrue(NSPredicate(format: "label == %@ OR value == %@", "6 turns left", "6 turns left")
+            .evaluate(with: turns))
     }
 
     func testStopResetRepeatedSendAndSafeFailure() {
