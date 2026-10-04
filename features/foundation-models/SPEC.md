@@ -31,7 +31,8 @@ The model runs on device, but manifest webhook tools can require networking. The
 - Resolver tests cover strategy-consistent availability and exact Apple model selection.
 - `scripts/verify-public-schema.sh` keeps vendored schema and manifest bytes aligned to the pinned source.
 - Run package and demo SDK builds plus the existing macOS/iOS UI suites when the adapter changes, recording counts and skips separately.
-- Run the CLI from the original checked-in manifest without `ANTHROPIC_API_KEY`, recording model, OS, events, and actual generation output. An owner-operated airplane-mode pass on a signed physical iOS app remains a separate acceptance check.
+- Run the CLI from the original checked-in manifest without `ANTHROPIC_API_KEY`, recording model, OS, events, and actual generation output. The owner deferred the signed physical-device airplane-mode check from AF-78 to [AF-84](https://infinitiqtech.atlassian.net/browse/AF-84); that follow-up requires actual offline evidence and does not inherit a pass from these checks.
+- A hosted final-revision macOS job running all four existing Debug Simulation UI tests can satisfy the deterministic Mac UI regression without local Automation Mode authentication. Record exact revision, run and test results; do not infer execution from workflow configuration or a badge.
 
 ## Conformance criteria
 

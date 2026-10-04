@@ -130,6 +130,9 @@ See [on-device verification](docs/foundation-models-verification.md) for the
 offline acceptance procedure and evidence boundaries. Model generation is
 on-device; webhook tools can still require network access. The bundled story
 demo uses an in-memory native tool.
+Physical-device airplane-mode verification is tracked separately in
+[AF-84](https://infinitiqtech.atlassian.net/browse/AF-84), deferred from AF-78
+by the owner. This deferral does not claim an offline test passed.
 
 ## SwiftUI demo (iOS + macOS)
 

@@ -1,5 +1,10 @@
 # Foundation Models verification (AF-78)
 
+The owner deferred physical-device airplane-mode acceptance from AF-78 to
+[AF-84](https://infinitiqtech.atlassian.net/browse/AF-84) on 2026-10-04.
+The procedure below remains the required evidence for that follow-up; no
+offline result is implied by AF-78 implementation or publication.
+
 ## Evidence scopes
 
 | Check | Establishes | Does not establish |
@@ -69,3 +74,14 @@ airplane-mode criterion passed based on builds, injected output, or an online Ma
 The runtime targets the iOS 26 GA `SystemLanguageModel` and
 `LanguageModelSession.GenerationError` APIs. Later API additions in current
 Apple documentation do not raise this package's availability gates.
+
+## macOS UI regression
+
+Local macOS UI tests require host Automation Mode authorization. Hosted CI's
+`Runtime and demo (macos)` job invokes the same unfiltered four-test Debug
+Simulation UI suite with ad hoc signing. A successful run on the final PR
+revision, with all four test results present in its logs/result bundle, can
+satisfy that regression without changing the local host's permissions. Prior
+revision results or a badge alone are insufficient; record the tested revision,
+run URL, test totals, and skips. This UI evidence remains distinct from live
+Foundation Models generation and AF-84 offline acceptance.
