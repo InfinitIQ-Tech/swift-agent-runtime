@@ -3,3 +3,7 @@
 *.xcodeproj
 DerivedData/
 .public-schema/
+!Demo/AgentRuntimeDemo.xcodeproj/
+!Demo/AgentRuntimeDemo.xcodeproj/**
+**/xcuserdata/
+*.xcresult/
