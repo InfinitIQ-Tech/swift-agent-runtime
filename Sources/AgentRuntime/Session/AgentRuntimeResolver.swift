@@ -25,15 +25,8 @@ public enum AgentRuntimeResolver {
         adapters: [any AgentRuntimeAdapter]? = nil
     ) throws -> any AgentSession {
         let adapters = adapters ?? defaultAdapters()
-        let candidates: [AgentModelCandidate]
-        if manifest.config.model.strategy == "single" {
-            candidates = Array(manifest.config.model.candidates.prefix(1))
-        } else {
-            candidates = manifest.config.model.candidates
-        }
-
         var lastReason: AgentRuntimeUnavailableReason = .unsupportedModel
-        for candidate in candidates {
+        for candidate in candidates(for: manifest) {
             for adapter in adapters where adapter.supports(candidate: candidate) {
                 switch adapter.availability(for: candidate, configuration: configuration) {
                 case .available:
@@ -50,8 +43,8 @@ public enum AgentRuntimeResolver {
         throw AgentRuntimeError.modelUnavailable(lastReason)
     }
 
-    /// Composite availability over all candidates: available when any
-    /// candidate has an available adapter.
+    /// Availability under the same selection strategy used by `makeSession`.
+    /// A `single` strategy never advertises a later fallback candidate.
     public static func availability(
         manifest: AgentManifest,
         configuration: AgentSessionConfiguration = AgentSessionConfiguration(),
@@ -59,7 +52,7 @@ public enum AgentRuntimeResolver {
     ) -> AgentRuntimeAvailability {
         let adapters = adapters ?? defaultAdapters()
         var lastReason: AgentRuntimeUnavailableReason = .unsupportedModel
-        for candidate in manifest.config.model.candidates {
+        for candidate in candidates(for: manifest) {
             for adapter in adapters where adapter.supports(candidate: candidate) {
                 switch adapter.availability(for: candidate, configuration: configuration) {
                 case .available:
@@ -70,5 +63,12 @@ public enum AgentRuntimeResolver {
             }
         }
         return .unavailable(lastReason)
+    }
+
+    private static func candidates(for manifest: AgentManifest) -> [AgentModelCandidate] {
+        if manifest.config.model.strategy == "single" {
+            return Array(manifest.config.model.candidates.prefix(1))
+        }
+        return manifest.config.model.candidates
     }
 }

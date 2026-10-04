@@ -20,6 +20,7 @@ final class ResolverTests: XCTestCase {
             StubAdapter(identifier: "cloud", provider: "anthropic", availabilityResult: .available)
         ]
 
+        XCTAssertEqual(AgentRuntimeResolver.availability(manifest: manifest, adapters: adapters), .available)
         let session = try AgentRuntimeResolver.makeSession(manifest: manifest, adapters: adapters)
         let events = try await collectEvents(await session.send("hello"))
         guard case .end(let result)? = events.last else {
@@ -35,6 +36,10 @@ final class ResolverTests: XCTestCase {
             StubAdapter(identifier: "cloud", provider: "anthropic", availabilityResult: .available)
         ]
 
+        XCTAssertEqual(
+            AgentRuntimeResolver.availability(manifest: manifest, adapters: adapters),
+            .unavailable(.deviceNotEligible)
+        )
         XCTAssertThrowsError(try AgentRuntimeResolver.makeSession(manifest: manifest, adapters: adapters)) { error in
             guard case AgentRuntimeError.modelUnavailable(let reason) = error else {
                 return XCTFail("expected modelUnavailable, got \(error)")
@@ -49,6 +54,21 @@ final class ResolverTests: XCTestCase {
             guard case AgentRuntimeError.modelUnavailable(.unsupportedModel) = error else {
                 return XCTFail("expected unsupportedModel, got \(error)")
             }
+        }
+    }
+
+    func testSingleUnsupportedCandidateDoesNotAdvertiseFallback() throws {
+        let manifest = try Fixtures.manifest(for: Fixtures.config(candidates: [
+            AgentModelCandidate(name: "unsupported", model: "apple:unknown-model"),
+            AgentModelCandidate(name: "cloud", model: "anthropic:claude-haiku-4-5")
+        ], strategy: "single"))
+        let adapters: [any AgentRuntimeAdapter] = [
+            FoundationModelsAdapter(),
+            StubAdapter(identifier: "cloud", provider: "anthropic", availabilityResult: .available)
+        ]
+        XCTAssertEqual(AgentRuntimeResolver.availability(manifest: manifest, adapters: adapters), .unavailable(.unsupportedModel))
+        XCTAssertThrowsError(try AgentRuntimeResolver.makeSession(manifest: manifest, adapters: adapters)) { error in
+            XCTAssertEqual(error as? AgentRuntimeError, .modelUnavailable(.unsupportedModel))
         }
     }
 
@@ -78,6 +98,9 @@ final class ResolverTests: XCTestCase {
     func testFoundationModelsAdapterFiltersProviders() {
         let adapter = FoundationModelsAdapter()
         XCTAssertTrue(adapter.supports(candidate: AgentModelCandidate(name: "d", model: "apple:foundation-models")))
+        let unknown = AgentModelCandidate(name: "unknown", model: "apple:unknown-model")
+        XCTAssertFalse(adapter.supports(candidate: unknown))
+        XCTAssertEqual(adapter.availability(for: unknown, configuration: .init()), .unavailable(.unsupportedModel))
         XCTAssertFalse(adapter.supports(candidate: AgentModelCandidate(name: "c", model: "anthropic:claude-haiku-4-5")))
         XCTAssertEqual(
             adapter.availability(
