@@ -21,7 +21,7 @@ The adapter uses the iOS 26/macOS 26 GA API surface, with `canImport(FoundationM
 
 ## Availability and recovery
 
-`FoundationModelsAdapter.availability` exposes `osTooOld`, `deviceNotEligible`, `appleIntelligenceNotEnabled`, `modelNotReady`, and `unsupportedModel` without constructing a session. Hosts can retry after the owner enables Apple Intelligence or finishes model download, offer the manifest's cloud candidate with an explicitly supplied key, or leave sending unavailable. Context overflow and guardrail refusals remain typed generation errors. Hosts discard interrupted sessions to avoid reusing a framework transcript with a partial turn.
+`FoundationModelsAdapter.availability` exposes `osTooOld`, `deviceNotEligible`, `appleIntelligenceNotEnabled`, `modelNotReady`, and `unsupportedModel` without constructing a session. Hosts can retry after the owner enables Apple Intelligence or finishes model download, offer the manifest's cloud candidate with an explicitly supplied key, or keep the Send control disabled while the adapter is unavailable. Context overflow and guardrail refusals remain typed generation errors. Hosts discard interrupted sessions to avoid reusing a framework transcript with a partial turn.
 
 The model runs on device, but manifest webhook tools can require networking. The checked-in story manifest uses a native tool; the SwiftUI host stores stories in memory. Offline evidence requires a real eligible device with downloaded model assets, the original bundled manifest, no provider key, and successful generation with connectivity disabled by its owner. Simulation/injected operations and Simulator builds do not prove offline model execution. Automation must not disconnect a remotely operated execution Mac.
 
