@@ -77,15 +77,20 @@ results belong in the feature log after execution.
 
 ## Owner-run live acceptance
 
-The smallest prerequisite is owner approval for **one invocation up to $0.21
-USD before tax**, followed by owner entry of an existing single-workspace API
-key that can access the manifest's `claude-haiku-4-5` candidate. Approval covers
-one invocation only; a retry requires separate approval. No key should be
-supplied in chat, to the coding agent, or through a repository/configuration
-file. The agent must not find stored keys, generate credentials, change account
-settings, open the secure prompt, or perform the live call. A normal interactive
-terminal controlled by the owner is needed; the secure prompt rejects piped
-stdin. No Mac UI Automation authorization is required by this CLI procedure.
+The live check uses owner-authorized provider usage and an existing
+single-workspace API key that can access the manifest's `claude-haiku-4-5`
+candidate. With explicit owner permission, the coding agent may prepare the
+executable, open its protected prompt, and monitor credential-free results.
+The owner alone enters the key and initiates the request by typing `SEND`.
+Permission to prepare or open the prompt does not authorize the agent to
+acquire, enter, capture, or transmit a credential, or to send the request on the
+owner's behalf. No key belongs in chat, a repository/configuration file, or a
+recording. A normal interactive terminal is needed; the secure prompt rejects
+piped stdin. `readpassphrase` requires a controlling terminal with echo off,
+accepts up to 1,022 UTF-8 bytes, rejects a full/oversized input buffer, validates
+UTF-8, and clears its temporary buffer. This replaces the shorter `getpass`
+reader; a long key must not be silently truncated. No Mac UI Automation
+authorization is required by this procedure.
 
 The `--cloud-smoke-test` mode checks the original manifest's SHA-256 and uses
 the cloud adapter even when Foundation Models is available. It sends one fixed
@@ -94,8 +99,10 @@ and permits at most one provider request across both streaming and full-response
 transport methods. A second request, including a tool continuation, is refused
 locally. The original tools remain in the request. The mode always uses hidden
 key entry and never reads an environment key; after entry it waits for the owner
-to type `SEND` and press Enter before initiating the request. It exits after the one turn and
-rejects a conflicting `--adapter on-device` selection.
+to type `SEND` and press Enter before initiating the request. It exits after
+the one turn and rejects a conflicting `--adapter on-device` selection. The
+terminal flow contains no cost text or separate budget gate; published pricing
+and the calculation below are documentation, not an extra terminal interaction.
 
 The price calculation was checked against official documentation on 2026-10-04.
 [Haiku 4.5 pricing](https://platform.claude.com/docs/en/about-claude/pricing)
@@ -130,18 +137,19 @@ output and tool-round limits and does not share this smoke-test cost bound.
    .build/debug/agent-runtime-demo --manifest Manifests/story-companion.agentconfig.json --adapter cloud --dry-run
    ```
 
-2. Obtain explicit spend approval for the single bounded invocation described
-   above. Only after approval, the owner runs the built executable in an
-   interactive terminal:
+2. Within the owner's authorization, start the built executable in an
+   interactive terminal. The owner may start it directly or explicitly permit
+   the coding agent to open the protected prompt:
 
    ```sh
    .build/debug/agent-runtime-demo --manifest Manifests/story-companion.agentconfig.json --cloud-smoke-test
    ```
 
    The owner enters the key only at the hidden terminal prompt, then explicitly
-   types `SEND` and presses Enter at the request confirmation. The key stays in process memory,
-   absent from command arguments and shell history, and is not persisted by the
-   runtime. The owner's process sends it over HTTPS directly to Anthropic for
+   types `SEND` and presses Enter at the request confirmation. Any other input
+   exits without a request. The key stays in process memory, absent from
+   command arguments and shell history, and is not persisted by the runtime.
+   The owner's process sends it over HTTPS directly to Anthropic for
    authentication. The coding agent never enters, captures, handles, or
    transmits the key. Credential entry must not be recorded or logged.
 
@@ -151,15 +159,16 @@ output and tool-round limits and does not share this smoke-test cost bound.
    the `end` event; a start line alone is not successful acceptance. A tool
    request cannot trigger a second paid request; the resulting failure is
    unsuccessful acceptance. Truncation, provider errors, or missing completion
-   must also be recorded as observed. No automatic or owner retry is covered
-   by the first approval.
+   must also be recorded as observed. A retry is a new invocation and must be
+   within the owner's authorization; the CLI does not retry automatically.
 
 4. The process exits after the turn. Record the tested Git revision, manifest
    SHA-256, command without credentials, selected candidate, observed streaming,
    completion or typed failure, and timestamp. Capture only ordinary runtime
    output after secure entry; never record request headers, environment dumps,
    credential input, or raw provider bodies. Confirm the checked-in manifest
-   is unchanged:
+   is unchanged. The coding agent may monitor these credential-free results
+   when the owner has permitted it:
 
    ```sh
    git diff --exit-code -- Manifests/story-companion.agentconfig.json
@@ -177,3 +186,50 @@ Deterministic tests, dry runs, or an available local Foundation Models session
 do not satisfy that acceptance criterion. Physical-device airplane-mode
 acceptance remains separately tracked in
 [AF-84](https://infinitiqtech.atlassian.net/browse/AF-84).
+
+## Optional credential-free status file
+
+`--smoke-status-file <path>` is opt-in and accepted only with a non-dry
+`--cloud-smoke-test`. Without the flag, the CLI creates no status file. The
+status writer belongs to the CLI, outside the portable runtime protocol and
+manifest. It overwrites its selected file atomically with the latest snapshot;
+it is not an event log. For an authorized owner handoff, a fresh path can be
+prepared as follows:
+
+```sh
+smoke_status_path="/tmp/af80-smoke-$(uuidgen).json"
+.build/debug/agent-runtime-demo --manifest Manifests/story-companion.agentconfig.json --cloud-smoke-test --smoke-status-file "$smoke_status_path"
+```
+
+The owner still enters the key and types `SEND`. Authorized monitoring reads
+only this credential-free file or approved post-entry results, never terminal
+input. The closed schema contains only:
+
+| Field | Meaning |
+|---|---|
+| `schemaVersion` | Format version, currently `1` |
+| `processID` | PID of this CLI process |
+| `updatedAt` | Unix timestamp in seconds for the latest snapshot |
+| `stage` | One fixed stage from the list below |
+| `requestStarted` | Whether the local transport was invoked; sticky once true |
+| `streamed` | Whether a nonempty runtime text chunk was observed; sticky once true |
+| `httpStatus` | Optional HTTP status restricted to 100–599 |
+| `failure` | Optional fixed category such as `credential_entry`, `authentication`, `network`, `invalid_response`, or `output_limit`; never raw error text |
+
+Stages are `started`, `credential_entry_requested`, `awaiting_send`,
+`owner_declined`, `turn_started`, `request_started`, `response_received`,
+`streaming`, `completed`, and `failed`. No field accepts a key, input/prompt
+text, generated text, request body, header, tool argument, or provider body.
+
+Interpretation requires a fresh path, the expected launched PID, and timestamps
+consistent with the current run. A prior or stale snapshot does not describe
+current process health; a write failure can leave an older snapshot in place.
+`credential_entry_requested` is written **before** calling the protected reader
+and does not establish that the TTY was opened, echo was disabled, or the
+prompt is ready for input. `awaiting_send` means the reader returned and the CLI
+is waiting for owner confirmation. `request_started` records a local transport
+attempt, not provider receipt. A 200 response or `turn_started` alone is not
+successful completion. `completed` records the runtime end event; live streaming
+evidence additionally requires `streamed: true` and the matching fresh
+revision/manifest/run identity. No status snapshot substitutes for a verified
+owner-run result.

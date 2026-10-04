@@ -218,15 +218,16 @@ swift run agent-runtime-demo --manifest Manifests/story-companion.agentconfig.js
 # general cloud chat; hidden terminal key entry
 swift run agent-runtime-demo --manifest Manifests/story-companion.agentconfig.json --adapter cloud --prompt-provider-key
 
-# owner-run bounded live check, only after separate spend approval
+# bounded live check within the owner's authorization
 .build/debug/agent-runtime-demo --manifest Manifests/story-companion.agentconfig.json --cloud-smoke-test
 ```
 
 `--adapter automatic` is the default; `cloud` and `on-device` restrict the
 available adapter set without editing the manifest or changing the send loop.
 Supplying a key alone does not override an available on-device candidate.
-`--prompt-provider-key` reads a key from an interactive terminal with echo
-disabled. The CLI also accepts an owner-provided `ANTHROPIC_API_KEY` in its
+`--prompt-provider-key` uses `readpassphrase` with echo disabled and a required
+controlling terminal. It accepts up to 1,022 UTF-8 bytes, rejects oversized
+input, and clears its temporary buffer. The CLI also accepts an owner-provided `ANTHROPIC_API_KEY` in its
 process environment when the prompt flag is absent; no key belongs in a shell
 command, `.env` file, launch configuration, or chat. `--dry-run` neither reads
 provider keys nor prompts for them and makes no provider request.
@@ -235,13 +236,26 @@ provider keys nor prompts for them and makes no provider request.
 original manifest's SHA-256, forces cloud, sets `max_tokens: 256` and
 `service_tier: "standard_only"`, and permits at most one provider request,
 including tool continuations. It always uses hidden owner key entry, ignores
-environment keys, and requires the owner to type `SEND` and press Enter before sending its
-fixed short prompt. It exits after that turn; `--adapter on-device` conflicts
+environment keys, and requires the owner to type `SEND` and press Enter before
+sending its fixed short prompt. With explicit owner permission, the coding
+agent may prepare/open the protected prompt and monitor credential-free
+results; the owner alone enters the key and initiates the request. It exits
+after that turn; `--adapter on-device` conflicts
 with this mode. A tool continuation is denied and does not count as successful
 live acceptance. The documented standard-rate ceiling is **$0.20128 before
-tax**; authorization is for **one invocation up to $0.21 before tax**, with
-separate approval required for any retry. Pricing assumptions, secure entry,
+tax** at published standard prices; tax and custom account terms are excluded.
+The terminal flow has no cost text or separate budget gate. Each invocation
+must stay within the owner's authorization. Pricing assumptions, secure entry,
 and evidence requirements are in [cloud verification](docs/cloud-verification.md).
+
+Optional `--smoke-status-file <path>` requires `--cloud-smoke-test` without
+`--dry-run`. It writes only a closed JSON schema of PID, timestamp, fixed
+stage/failure values, numeric HTTP status, and request/stream flags; it never
+writes credential input, request bodies, generated text, or raw errors. Use a
+fresh path and verify the expected process and timestamps before interpreting
+it. `credential_entry_requested` means the reader is about to be called; it
+does **not** prove the protected prompt is ready. The verification guide
+defines the remaining stage and completion evidence boundaries.
 
 Maintainers can regenerate the checked-in Xcode project from `Demo/project.yml`
 with XcodeGen (`xcodegen generate --spec Demo/project.yml`; generated with 2.45.4).

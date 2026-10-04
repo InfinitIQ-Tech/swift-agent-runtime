@@ -1,5 +1,25 @@
 # Cloud adapter spec log
 
+## 2026-10-04 — Resumed final verification
+
+- Final resumed CLI source passed `swift test`: 156 tests, zero failures/skips (132 XCTest + 24 Swift Testing). The macOS Release full-package build and generic iOS Simulator/device SDK Release CLI builds all passed; the pinned schema/examples gate passed. Runtime, demo support, app/UI and package-test sources remain identical to the previously verified implementation.
+- Additional deterministic checks passed separately: 10 CLI command checks, two prompt-copy/dry-run checks, two canonical synthetic-reader tests, two complete synthetic CLI decline/status tests, and 10 actual-source status serialization tests. The reader harness checks exact 300-byte fixture preservation and rejects a full canonical buffer; the CLI flow verifies echo is disabled and STOP makes no request. The status tests cover bounded schema, arbitrary-error payload exclusion, sticky milestones, HTTP bounds and atomic concurrent writes. A one-byte mistake in the new test fixture expectation was corrected before its final passing run; product code did not change for that correction.
+- Checked-in commands: `python3 scripts/test-cli-smoke-prompt.py --binary .build/debug/agent-runtime-demo`, `python3 scripts/test-secure-key-reader.py`, `python3 scripts/test-cli-owner-flow.py --binary .build/debug/agent-runtime-demo`, and `python3 scripts/test-cloud-smoke-status.py`. The PTY tests create their own synthetic terminal and never read owner input or send a provider request.
+- The execution gate rejected the owner-prompt launch despite the relayed renewed authorization; the application was not started by that attempt. Historical owner-run failure remains undiagnosed because Terminal inspection was separately blocked and no original safe status artifact existed. No live cloud success, current owner prompt readiness, hosted CI or new Mac UI result is claimed. Publication status is recorded in the local delivery report after the separately authorized attempt.
+
+## 2026-10-04 — Protected reader and opt-in smoke status
+
+- Updated `SPEC.md`, `README.md`, and `docs/cloud-verification.md` for the CLI's TTY-only `readpassphrase` reader, 1,022-byte UTF-8 input limit, oversized-input rejection, and temporary-buffer clearing. The former `getpass` reader could truncate longer input.
+- Documented opt-in `--smoke-status-file`, its non-dry smoke-mode requirement, closed snapshot schema, fresh path/PID/timestamp checks, and the distinction between requested credential entry and verified protected-prompt readiness. The status file never serializes terminal input, credentials, bodies/headers, generated text, or raw errors.
+- Resumed verification records show `swift build --product agent-runtime-demo` passed and the existing CLI command matrix passed 10 checks with zero failures/provider calls. Two synthetic protected-reader tests passed: longer-than-`getpass` input is preserved without echo, and full-buffer input is rejected without echo. These are separate checks, not additions to or reruns of the historical 156-test platform totals. Evidence: `verification/cli-owner-resume-build-final.result.json`, `cli-resume-checks.log`, and `secure-key-reader-tests.log` in the task workspace.
+- The attempted protected owner-prompt launch remained blocked by the execution tool in this phase. No actual owner prompt readiness or live-provider acceptance is claimed. Final revision capture and any subsequent verification are recorded separately.
+
+## 2026-10-04 — Owner-authorized protected prompt preparation
+
+- Updated `SPEC.md`, `docs/cloud-verification.md`, and `README.md` to reflect explicit owner permission for the coding agent to prepare/open the protected prompt and monitor credential-free results. This supersedes the earlier blanket prohibition on opening that prompt; it does not authorize credential acquisition, entry, capture, transmission, or agent initiation of the provider request.
+- The owner retains hidden key entry and the `SEND` confirmation. The terminal flow has no cost text or separate budget gate. The one-request transport limit, 256-token output cap, standard tier, exact manifest check, and technical pricing explanation remain unchanged.
+- This workflow documentation update records no live provider result or new test execution. The revision-specific test evidence below remains scoped to the recorded implementation; any subsequent CLI copy change requires its own verification record.
+
 ## 2026-10-04 — AF-80 implementation contract
 
 - Audited the existing Messages adapter and live AF-80 before implementation. Read Company Philosophy page 4292609 version 1 and the AgentFactory-owned runtime contract.

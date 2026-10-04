@@ -15,7 +15,11 @@ import Darwin
 // Foundation Models when available (macOS 26 with Apple Intelligence),
 // otherwise the Anthropic cloud adapter when a key is supplied.
 
-func fail(_ message: String) -> Never {
+var smokeStatus: CloudSmokeStatus?
+
+@MainActor
+func fail(_ message: String, category: CloudSmokeStatus.Failure = .configuration) -> Never {
+    smokeStatus?.record(.failed, failure: category)
     FileHandle.standardError.write(Data(("error: " + message + "\n").utf8))
     exit(1)
 }
@@ -25,6 +29,7 @@ var dryRun = false
 var adapterChoice = "automatic"
 var promptProviderKey = false
 var cloudSmokeTest = false
+var smokeStatusPath: String?
 var arguments = ArraySlice(CommandLine.arguments.dropFirst())
 while let argument = arguments.popFirst() {
     switch argument {
@@ -41,12 +46,21 @@ while let argument = arguments.popFirst() {
         promptProviderKey = true
     case "--cloud-smoke-test":
         cloudSmokeTest = true
+    case "--smoke-status-file":
+        guard let value = arguments.popFirst() else { fail("--smoke-status-file requires a path") }
+        smokeStatusPath = value
     case "--help", "-h":
-        print("usage: agent-runtime-demo --manifest <path> [--dry-run] [--adapter automatic|cloud|on-device] [--prompt-provider-key] [--cloud-smoke-test]")
+        print("usage: agent-runtime-demo --manifest <path> [--dry-run] [--adapter automatic|cloud|on-device] [--prompt-provider-key] [--cloud-smoke-test] [--smoke-status-file <path>]")
         exit(0)
     default:
         fail("unknown argument \(argument)")
     }
+}
+
+if let smokeStatusPath {
+    guard cloudSmokeTest, !dryRun else { fail("--smoke-status-file requires a non-dry cloud smoke test") }
+    do { smokeStatus = try CloudSmokeStatus(path: smokeStatusPath) }
+    catch { fail("smoke status file could not be created") }
 }
 
 guard let manifestPath else {
@@ -79,19 +93,27 @@ print("Model candidates: \(config.model.candidates.map(\.model).joined(separator
 
 var keys = ProviderKeys()
 if (promptProviderKey || cloudSmokeTest) && !dryRun {
-    // getpass reads from the controlling terminal with echo disabled. Never
-    // accept a key as an argument, place it in shell history, or print it.
-    guard isatty(STDIN_FILENO) == 1,
-          let input = getpass("Anthropic key (in memory only): ") else {
-        fail("secure key entry requires an interactive terminal")
+    // Read from the controlling terminal with echo disabled. Never accept a
+    // key as an argument, place it in shell history, or print it.
+    guard isatty(STDIN_FILENO) == 1 else {
+        fail("secure key entry requires an interactive terminal", category: .credentialEntry)
     }
-    keys[ProviderKeys.anthropicProvider] = String(cString: input)
-    memset(input, 0, strlen(input))
+    smokeStatus?.record(.credentialEntryRequested)
+    do {
+        keys[ProviderKeys.anthropicProvider] = try readSecureProviderKey()
+    } catch SecureKeyReaderError.inputTooLong {
+        fail("provider key input is too long", category: .credentialEntry)
+    } catch {
+        fail("secure key entry requires an interactive terminal", category: .credentialEntry)
+    }
     if cloudSmokeTest {
-        print("One Claude Haiku 4.5 request, 256 output tokens, standard tier. Conservative ceiling: US$0.21 before tax.")
-        print("Type SEND to initiate this paid request, or anything else to exit: ", terminator: "")
+        print("Type SEND to send the request, or anything else to exit: ", terminator: "")
         fflush(stdout)
-        guard readLine() == "SEND" else { exit(0) }
+        smokeStatus?.record(.awaitingSend)
+        guard readLine() == "SEND" else {
+            smokeStatus?.record(.ownerDeclined)
+            exit(0)
+        }
     }
 } else if !dryRun, let anthropicKey = ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"] {
     keys[ProviderKeys.anthropicProvider] = anthropicKey
@@ -99,8 +121,11 @@ if (promptProviderKey || cloudSmokeTest) && !dryRun {
 let adapters: [any AgentRuntimeAdapter]
 switch adapterChoice {
 case "cloud":
+    let smokeTransport: any HTTPStreamTransport = smokeStatus.map {
+        SingleRequestCloudTransport(transport: ObservedCloudSmokeTransport(status: $0))
+    } ?? SingleRequestCloudTransport()
     adapters = cloudSmokeTest
-        ? [ClaudeMessagesAdapter(maxTokens: 256, transport: SingleRequestCloudTransport())]
+        ? [ClaudeMessagesAdapter(maxTokens: 256, transport: smokeTransport)]
         : [ClaudeMessagesAdapter()]
 case "on-device": adapters = [FoundationModelsAdapter()]
 default: adapters = AgentRuntimeResolver.defaultAdapters()
@@ -122,14 +147,14 @@ if dryRun {
 }
 
 guard availability.isAvailable else {
-    fail("no adapter available — use an eligible Foundation Models device or --prompt-provider-key for cloud")
+    fail("no adapter available — use an eligible Foundation Models device or --prompt-provider-key for cloud", category: .unavailable)
 }
 
 let session: any AgentSession
 do {
     session = try AgentRuntimeResolver.makeSession(manifest: manifest, configuration: configuration, adapters: adapters)
 } catch {
-    fail("could not open session: \(error)")
+    fail("could not open session: \(error)", category: .classify(error))
 }
 
 if !cloudSmokeTest { print("Type a message (ctrl-d to exit).") }
@@ -150,8 +175,10 @@ runLoop: while true {
         for try await event in events {
             switch event {
             case .start(let start):
+                smokeStatus?.record(.turnStarted)
                 print("[turn \(start.turn) on \(start.model)]")
             case .chunk(let delta):
+                if !delta.isEmpty { smokeStatus?.record(.streaming) }
                 print(delta, terminator: "")
                 fflush(stdout)
             case .toolCall(let call):
@@ -159,6 +186,7 @@ runLoop: while true {
             case .toolResult(let result):
                 print("[tool result: \(result.toolId) success=\(result.success)]")
             case .end(let result):
+                smokeStatus?.record(.completed)
                 if !manifest.config.runtime.streaming || manifest.config.output != nil {
                     print(result.text, terminator: "")
                 }
@@ -169,10 +197,11 @@ runLoop: while true {
             }
         }
     } catch AgentRuntimeError.maxTurnsExceeded(let limit) {
+        smokeStatus?.record(.failed, failure: .turnLimit)
         print("\n[max_turns (\(limit)) reached — session complete]")
         break runLoop
     } catch {
-        fail("turn failed: \(error)")
+        fail("turn failed: \(error)", category: .classify(error))
     }
     if cloudSmokeTest { break }
 }
