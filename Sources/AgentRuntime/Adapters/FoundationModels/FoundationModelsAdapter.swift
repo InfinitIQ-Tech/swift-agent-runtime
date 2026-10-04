@@ -14,7 +14,7 @@ public struct FoundationModelsAdapter: AgentRuntimeAdapter {
     public init() {}
 
     public func supports(candidate: AgentModelCandidate) -> Bool {
-        candidate.provider == "apple"
+        candidate.model == "apple:foundation-models"
     }
 
     public func availability(
@@ -99,8 +99,9 @@ actor ToolEventRelay {
     }
 
     func emitResult(_ result: AgentToolResult) {
+        guard let continuation else { return }
         results.append(result)
-        continuation?.yield(.toolResult(result))
+        continuation.yield(.toolResult(result))
     }
 }
 
@@ -213,19 +214,39 @@ enum GenerationSchemaBuilder {
     }
 }
 
-/// Internal injection seam for deterministic tests of guided generation and
-/// prewarm. Production closures call the framework session directly.
+/// Internal injection seam for deterministic session tests. Production
+/// closures call the framework session directly in the active turn's task.
 @available(iOS 26.0, macOS 26.0, *)
 struct FoundationModelsOperations: Sendable {
     var prewarm: @Sendable () async -> Void
     var respond: @Sendable (String, GenerationSchema) async throws -> String
+    var respondText: @Sendable (String) async throws -> String
+    // nil represents a framework null placeholder, never the text "null".
+    var streamText: @Sendable (String, @Sendable (String?) async throws -> Void) async throws -> Void
 
     init(
-        prewarm: @escaping @Sendable () async -> Void,
-        respond: @escaping @Sendable (String, GenerationSchema) async throws -> String
+        prewarm: @escaping @Sendable () async -> Void = {},
+        respond: @escaping @Sendable (String, GenerationSchema) async throws -> String = { _, _ in
+            throw AgentRuntimeError.generationFailed("No structured response operation supplied")
+        },
+        respondText: @escaping @Sendable (String) async throws -> String = { _ in
+            throw AgentRuntimeError.generationFailed("No text response operation supplied")
+        },
+        streamText: @escaping @Sendable (String, @Sendable (String?) async throws -> Void) async throws -> Void = { _, _ in
+            throw AgentRuntimeError.generationFailed("No text streaming operation supplied")
+        }
     ) {
         self.prewarm = prewarm
         self.respond = respond
+        self.respondText = respondText
+        self.streamText = streamText
+    }
+
+    /// Raw null is a tool placeholder; a generated string containing "null"
+    /// is ordinary text and must survive streaming unchanged.
+    static func textSnapshot(_ content: String, rawContent: GeneratedContent) -> String? {
+        if case .null = rawContent.kind { return nil }
+        return content
     }
 
     init(session: LanguageModelSession) {
@@ -234,6 +255,50 @@ struct FoundationModelsOperations: Sendable {
             let response = try await session.respond(to: text, schema: schema, includeSchemaInPrompt: true)
             return response.content.jsonString
         }
+        respondText = { text in
+            try await session.respond(to: text).content
+        }
+        streamText = { text, receive in
+            for try await snapshot in session.streamResponse(to: text) {
+                try Task.checkCancellation()
+                try await receive(Self.textSnapshot(snapshot.content, rawContent: snapshot.rawContent))
+            }
+        }
+    }
+}
+
+/// Converts the framework's cumulative text snapshots into event deltas.
+/// Tool placeholders and segment restarts preserve the existing adapter behavior.
+private actor FoundationModelsTextAccumulator {
+    let continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation
+    var segments: [String] = []
+    var current = ""
+
+    init(continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation) {
+        self.continuation = continuation
+    }
+
+    func append(_ content: String?) throws {
+        try Task.checkCancellation()
+        guard let content, !content.isEmpty else {
+            if !current.isEmpty {
+                segments.append(current)
+                current = ""
+            }
+            return
+        }
+        if content.hasPrefix(current) {
+            let delta = String(content.dropFirst(current.count))
+            if !delta.isEmpty { continuation.yield(.chunk(delta)) }
+        } else {
+            if !current.isEmpty { segments.append(current) }
+            continuation.yield(.chunk(content))
+        }
+        current = content
+    }
+
+    func text() -> String {
+        (segments + [current]).joined()
     }
 }
 
@@ -251,7 +316,7 @@ actor FoundationModelsSession: AgentSession {
     // faults resolving those symbols. The typed accessors below restore the
     // concrete types inside this @available-gated context.
     private let sessionStorage: AnyObject
-    private let relay = ToolEventRelay()
+    private let relay: ToolEventRelay
     private let structuredSchemaStorage: (any Sendable)?
     private let operationsStorage: any Sendable
 
@@ -282,17 +347,18 @@ actor FoundationModelsSession: AgentSession {
         manifest: AgentManifest,
         candidate: AgentModelCandidate,
         configuration: AgentSessionConfiguration,
-        operations: FoundationModelsOperations? = nil
+        operations: FoundationModelsOperations? = nil,
+        relay: ToolEventRelay = ToolEventRelay()
     ) throws {
         self.manifest = manifest
         self.candidate = candidate
+        self.relay = relay
 
         let toolbox = AgentToolbox.resolve(config: manifest.config)
         let engine = ToolExecutionEngine(toolbox: toolbox, configuration: configuration)
         // Only normalized-allowed tools are ever registered with the model.
         // An agent with no tools configured registers zero tools.
         var bridgedTools: [any Tool] = []
-        let relay = self.relay
         for definition in toolbox.tools {
             let schema = try GenerationSchemaBuilder.makeSchema(
                 toolName: definition.name,
@@ -338,6 +404,10 @@ actor FoundationModelsSession: AgentSession {
 
     func send(_ text: String) async -> AsyncThrowingStream<AgentStreamEvent, Error> {
         let (stream, continuation) = AsyncThrowingStream<AgentStreamEvent, Error>.makeStream()
+        guard activeTurn == nil else {
+            continuation.finish(throwing: AgentRuntimeError.generationFailed("A turn is already in progress"))
+            return stream
+        }
         if let limit = manifest.config.runtime.maxTurns, usedTurns >= limit {
             continuation.finish(throwing: AgentRuntimeError.maxTurnsExceeded(limit: limit))
             return stream
@@ -346,16 +416,25 @@ actor FoundationModelsSession: AgentSession {
         let turnIndex = usedTurns
 
         let task = Task {
+            let failure: AgentRuntimeError?
             do {
-                try await self.runTurn(text: text, turnIndex: turnIndex, continuation: continuation)
-                continuation.finish()
-            } catch is CancellationError {
-                continuation.finish(throwing: AgentRuntimeError.cancelled)
-            } catch let error as AgentRuntimeError {
-                continuation.finish(throwing: error)
+                let result = try await self.runTurn(text: text, turnIndex: turnIndex, continuation: continuation)
+                try Task.checkCancellation()
+                history.append(AgentMessage(role: .assistant, content: result.text))
+                continuation.yield(.end(result))
+                failure = nil
             } catch {
-                continuation.finish(throwing: Self.mapGenerationError(error))
+                // Keep the active slot occupied until generation and relay
+                // cleanup unwind, including when an operation ignores cancel.
+                _ = await relay.endTurn()
+                if Task.isCancelled || error is CancellationError {
+                    failure = .cancelled
+                } else {
+                    failure = (error as? AgentRuntimeError) ?? Self.mapGenerationError(error)
+                }
             }
+            activeTurn = nil
+            continuation.finish(throwing: failure)
         }
         activeTurn = task
         continuation.onTermination = { termination in
@@ -370,14 +449,17 @@ actor FoundationModelsSession: AgentSession {
         text: String,
         turnIndex: Int,
         continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation
-    ) async throws {
+    ) async throws -> AgentTurnResult {
+        try Task.checkCancellation()
         continuation.yield(.start(AgentTurnStart(
             turn: turnIndex,
             candidate: candidate.name,
             model: candidate.model
         )))
         await engine.beginTurn()
+        try Task.checkCancellation()
         await relay.beginTurn(continuation)
+        try Task.checkCancellation()
         history.append(AgentMessage(role: .user, content: text))
 
         let finalText: String
@@ -390,58 +472,32 @@ actor FoundationModelsSession: AgentSession {
             finalText = json
         } else if manifest.config.runtime.streaming {
             // Snapshots are cumulative within a segment, but the stream can
-            // restart after an in-generation tool call, and a literal "null"
-            // placeholder can precede text while a tool call is pending.
-            var segments: [String] = []
-            var current = ""
-            let stream = session.streamResponse(to: text)
-            for try await snapshot in stream {
+            // restart after an in-generation tool call. The operations bridge
+            // distinguishes true null placeholders from the literal text "null".
+            let accumulator = FoundationModelsTextAccumulator(continuation: continuation)
+            try await operations.streamText(text) { content in
                 try Task.checkCancellation()
-                let content = snapshot.content
-                if content == "null" || content.isEmpty {
-                    if !current.isEmpty {
-                        segments.append(current)
-                        current = ""
-                    }
-                    continue
-                }
-                if content.hasPrefix(current) {
-                    let delta = String(content.dropFirst(current.count))
-                    if !delta.isEmpty {
-                        continuation.yield(.chunk(delta))
-                    }
-                } else {
-                    // Restarted segment: close the previous one, emit fresh.
-                    if !current.isEmpty {
-                        segments.append(current)
-                    }
-                    continuation.yield(.chunk(content))
-                }
-                current = content
+                try await accumulator.append(content)
             }
-            if !current.isEmpty {
-                segments.append(current)
-            }
-            finalText = segments.joined()
+            finalText = await accumulator.text()
         } else {
-            let response = try await session.respond(to: text)
-            finalText = response.content
+            finalText = try await operations.respondText(text)
         }
 
+        try Task.checkCancellation()
         let toolResults = await relay.endTurn()
-        history.append(AgentMessage(role: .assistant, content: finalText))
+        try Task.checkCancellation()
         let remaining = manifest.config.runtime.maxTurns.map { max(0, $0 - usedTurns) }
-        continuation.yield(.end(AgentTurnResult(
+        return AgentTurnResult(
             text: finalText,
             toolResults: toolResults,
             remainingTurns: remaining,
             structured: structuredPayload
-        )))
+        )
     }
 
     func cancel() {
         activeTurn?.cancel()
-        activeTurn = nil
     }
 
     func transcript() -> [AgentMessage] {

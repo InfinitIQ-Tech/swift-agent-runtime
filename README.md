@@ -41,8 +41,8 @@ for try await event in await session.send("Tell me a story") {
 
 | Manifest section | Behavior |
 |---|---|
-| `system_prompt` | Session instructions on every adapter |
-| `runtime.streaming` | Streamed `chunk` frames on, or a single `end` frame off |
+| `system_prompt` | Instructions from the loaded version snapshot on every adapter; later AgentFactory metadata edits do not mutate the session |
+| `runtime.streaming` | `start` → text-delta `chunk` frames → `end` when on; `start` → `end` when off (tool events may occur in either mode) |
 | `runtime.max_turns` | Typed `maxTurnsExceeded` once the session limit is reached |
 | `runtime.max_concurrent_tools` | Concurrent tool-execution width |
 | `model.strategy` / `model.candidates` | `single` uses the first candidate; `fallback` walks candidates in order until an adapter is available |
@@ -101,6 +101,35 @@ if AgentRuntimeResolver.availability(manifest: manifest).isAvailable { ... }
 ```
 
 Building requires the Xcode 26 SDK.
+
+The Foundation Models adapter uses the **iOS 26/macOS 26 GA API surface**:
+[`SystemLanguageModel.default`](https://developer.apple.com/documentation/foundationmodels/systemlanguagemodel/default),
+[`LanguageModelSession`](https://developer.apple.com/documentation/foundationmodels/languagemodelsession)
+instructions, text responses, cumulative response streams, guided generation,
+and prewarm. Only `apple:foundation-models` selects this on-device model;
+other `apple:` names are unsupported. The OS owns the installed model revision.
+Availability and session creation both respect `single` versus ordered fallback.
+
+On-device sessions admit one active generation. Overlapping sends fail with
+`generationFailed` without consuming a turn. Each admitted attempt consumes
+one `max_turns` slot, including failed/cancelled attempts. Cancellation keeps
+the active slot occupied until generation unwinds and prevents a late response
+from publishing a successful `end`. Hosts should discard interrupted sessions
+because the framework transcript may include a partial turn.
+
+Unavailable states are explicit: an older OS reports `osTooOld`; unsupported
+hardware reports `deviceNotEligible`; Apple Intelligence disabled reports
+`appleIntelligenceNotEnabled`; missing/downloading assets report `modelNotReady`.
+The host can disable sending and retry after the owner resolves the condition,
+or use an allowed cloud fallback only with a runtime-supplied key. No automatic
+model download, settings change, or provider credential acquisition occurs.
+An unsupported candidate reports `unsupportedModel`. Context-window exhaustion
+and guardrail refusals surface as typed errors during generation.
+
+See [on-device verification](docs/foundation-models-verification.md) for the
+offline acceptance procedure and evidence boundaries. Model generation is
+on-device; webhook tools can still require network access. The bundled story
+demo uses an in-memory native tool.
 
 ## SwiftUI demo (iOS + macOS)
 
