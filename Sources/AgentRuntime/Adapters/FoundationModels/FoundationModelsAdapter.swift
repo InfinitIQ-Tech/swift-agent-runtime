@@ -419,9 +419,7 @@ actor FoundationModelsSession: AgentSession {
             let failure: AgentRuntimeError?
             do {
                 let result = try await self.runTurn(text: text, turnIndex: turnIndex, continuation: continuation)
-                try Task.checkCancellation()
-                history.append(AgentMessage(role: .assistant, content: result.text))
-                continuation.yield(.end(result))
+                try publishTurnResult(result, to: continuation)
                 failure = nil
             } catch {
                 // Keep the active slot occupied until generation and relay
@@ -443,6 +441,27 @@ actor FoundationModelsSession: AgentSession {
             }
         }
         return stream
+    }
+
+    /// Commits assistant history only when the terminal frame is accepted.
+    /// Consumer termination can race the cancellation check from another executor,
+    /// so yield's result is the publication boundary, with no suspension afterward.
+    func publishTurnResult(
+        _ result: AgentTurnResult,
+        to continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation
+    ) throws {
+        try Task.checkCancellation()
+        switch continuation.yield(.end(result)) {
+        case .enqueued:
+            history.append(AgentMessage(role: .assistant, content: result.text))
+        case .terminated:
+            throw AgentRuntimeError.cancelled
+        case .dropped:
+            // Production streams are unbounded; fail explicitly if that changes.
+            throw AgentRuntimeError.generationFailed("Terminal event was dropped")
+        @unknown default:
+            throw AgentRuntimeError.generationFailed("Terminal event was not accepted")
+        }
     }
 
     private func runTurn(

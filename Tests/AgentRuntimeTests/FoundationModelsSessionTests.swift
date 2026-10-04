@@ -268,6 +268,59 @@ final class FoundationModelsSessionTests: XCTestCase {
         #endif
     }
 
+    func testConsumerTerminatedStreamCannotCommitAssistantTranscript() async throws {
+        #if canImport(FoundationModels)
+        guard #available(iOS 26.0, macOS 26.0, *) else { throw XCTSkip("Foundation Models requires OS 26") }
+        let session = try makeSession(operations: .init(respondText: { _ in "accepted reply" }))
+        _ = try await collectEvents(await session.send("first"))
+        let originalTranscript = await session.transcript()
+        let (stream, continuation) = AsyncThrowingStream<AgentStreamEvent, Error>.makeStream()
+        let consumer = Task {
+            var iterator = stream.makeAsyncIterator()
+            return try await iterator.next()
+        }
+        consumer.cancel()
+        _ = try await consumer.value
+
+        // This task is not cancelled: simulate termination winning immediately
+        // after the producer's check, before its terminal yield is accepted.
+        XCTAssertFalse(Task.isCancelled)
+        do {
+            try await session.publishTurnResult(.init(text: "rejected reply"), to: continuation)
+            XCTFail("expected cancelled for rejected terminal frame")
+        } catch let error as AgentRuntimeError {
+            XCTAssertEqual(error, .cancelled)
+        }
+        let transcript = await session.transcript()
+        XCTAssertEqual(transcript, originalTranscript)
+        #else
+        throw XCTSkip("FoundationModels SDK not present")
+        #endif
+    }
+
+    func testDroppedTerminalFrameCannotCommitAssistantTranscript() async throws {
+        #if canImport(FoundationModels)
+        guard #available(iOS 26.0, macOS 26.0, *) else { throw XCTSkip("Foundation Models requires OS 26") }
+        let session = try makeSession(operations: .init(respondText: { _ in "unused" }))
+        let (stream, continuation) = AsyncThrowingStream<AgentStreamEvent, Error>.makeStream(
+            bufferingPolicy: .bufferingOldest(0)
+        )
+        do {
+            try await session.publishTurnResult(.init(text: "dropped reply"), to: continuation)
+            XCTFail("expected failure for dropped terminal frame")
+        } catch let error as AgentRuntimeError {
+            XCTAssertEqual(error, .generationFailed("Terminal event was dropped"))
+        }
+        continuation.finish()
+        let events = try await collectEvents(stream)
+        let transcript = await session.transcript()
+        XCTAssertTrue(events.isEmpty)
+        XCTAssertTrue(transcript.isEmpty)
+        #else
+        throw XCTSkip("FoundationModels SDK not present")
+        #endif
+    }
+
     func testFrameworkNullMetadataIsDistinctFromLiteralNullText() throws {
         #if canImport(FoundationModels)
         guard #available(iOS 26.0, macOS 26.0, *) else { throw XCTSkip("Foundation Models requires OS 26") }
