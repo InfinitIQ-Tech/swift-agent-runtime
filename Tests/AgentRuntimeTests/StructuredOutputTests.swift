@@ -194,16 +194,13 @@ final class StructuredOutputTests: XCTestCase {
         guard #available(iOS 26.0, macOS 26.0, *) else {
             throw XCTSkip("Foundation Models requires iOS 26 / macOS 26")
         }
-        guard case .available = SystemLanguageModel.default.availability else {
-            throw XCTSkip("on-device model unavailable on this host")
-        }
         let config = Fixtures.config(
             candidates: [AgentModelCandidate(name: "on_device", model: "apple:foundation-models")],
             output: Fixtures.outputConfig(type: "yaml_prose")
         )
         let manifest = try Fixtures.manifest(for: config)
         XCTAssertThrowsError(
-            try FoundationModelsAdapter().makeSession(
+            try FoundationModelsSession(
                 manifest: manifest,
                 candidate: manifest.config.model.candidates[0],
                 configuration: AgentSessionConfiguration()
@@ -225,27 +222,4 @@ final class StructuredOutputTests: XCTestCase {
         XCTAssertTrue(transport.requests.isEmpty, "cloud prewarm must not touch the network")
     }
 
-    func testFoundationModelsSessionExposesPrewarm() async throws {
-        #if canImport(FoundationModels)
-        guard #available(iOS 26.0, macOS 26.0, *) else {
-            throw XCTSkip("Foundation Models requires iOS 26 / macOS 26")
-        }
-        guard case .available = SystemLanguageModel.default.availability else {
-            throw XCTSkip("on-device model unavailable on this host")
-        }
-        let config = Fixtures.config(
-            candidates: [AgentModelCandidate(name: "on_device", model: "apple:foundation-models")]
-        )
-        let manifest = try Fixtures.manifest(for: config)
-        let session = try FoundationModelsAdapter().makeSession(
-            manifest: manifest,
-            candidate: manifest.config.model.candidates[0],
-            configuration: AgentSessionConfiguration()
-        )
-        // Call-through to LanguageModelSession.prewarm(); must not throw or block.
-        await session.prewarm()
-        #else
-        throw XCTSkip("FoundationModels SDK not present")
-        #endif
-    }
 }

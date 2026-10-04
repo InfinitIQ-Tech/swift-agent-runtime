@@ -147,8 +147,14 @@ struct ManifestBridgedTool: Tool {
 @available(iOS 26.0, macOS 26.0, *)
 enum GenerationSchemaBuilder {
     static func makeSchema(toolName: String, parameters: [String: JSONValue]) throws -> GenerationSchema {
-        let root = try buildObject(name: toolName, schema: .object(parameters))
+        let root = try buildObject(name: "schema_" + encodedName(toolName), schema: .object(parameters))
         return try GenerationSchema(root: root, dependencies: [])
+    }
+
+    // Hex preserves every UTF-8 byte without introducing JSON Pointer syntax
+    // into $defs names. Segment delimiters prevent a.b and a_b collisions.
+    private static func encodedName(_ name: String) -> String {
+        name.utf8.map { String(format: "%02x", $0) }.joined()
     }
 
     private static func buildObject(name: String, schema: JSONValue) throws -> DynamicGenerationSchema {
@@ -162,7 +168,7 @@ enum GenerationSchemaBuilder {
         var properties: [DynamicGenerationSchema.Property] = []
         if case .object(let props)? = schema["properties"] {
             for (propertyName, propertySchema) in props.sorted(by: { $0.key < $1.key }) {
-                let child = try build(name: "\(name)_\(propertyName)", schema: propertySchema)
+                let child = try build(name: "\(name)_p\(encodedName(propertyName))", schema: propertySchema)
                 properties.append(
                     DynamicGenerationSchema.Property(
                         name: propertyName,
@@ -207,6 +213,30 @@ enum GenerationSchemaBuilder {
     }
 }
 
+/// Internal injection seam for deterministic tests of guided generation and
+/// prewarm. Production closures call the framework session directly.
+@available(iOS 26.0, macOS 26.0, *)
+struct FoundationModelsOperations: Sendable {
+    var prewarm: @Sendable () async -> Void
+    var respond: @Sendable (String, GenerationSchema) async throws -> String
+
+    init(
+        prewarm: @escaping @Sendable () async -> Void,
+        respond: @escaping @Sendable (String, GenerationSchema) async throws -> String
+    ) {
+        self.prewarm = prewarm
+        self.respond = respond
+    }
+
+    init(session: LanguageModelSession) {
+        prewarm = { session.prewarm() }
+        respond = { text, schema in
+            let response = try await session.respond(to: text, schema: schema, includeSchemaInPrompt: true)
+            return response.content.jsonString
+        }
+    }
+}
+
 /// A live on-device session. One `LanguageModelSession` per agent session;
 /// Foundation Models owns the transcript and runs allowed tools natively
 /// through `ManifestBridgedTool`.
@@ -223,6 +253,14 @@ actor FoundationModelsSession: AgentSession {
     private let sessionStorage: AnyObject
     private let relay = ToolEventRelay()
     private let structuredSchemaStorage: (any Sendable)?
+    private let operationsStorage: any Sendable
+
+    private var operations: FoundationModelsOperations {
+        guard let operations = operationsStorage as? FoundationModelsOperations else {
+            fatalError("FoundationModelsSession.operationsStorage must hold FoundationModelsOperations")
+        }
+        return operations
+    }
     private var history: [AgentMessage] = []
     private var usedTurns = 0
     private var activeTurn: Task<Void, Never>?
@@ -243,7 +281,8 @@ actor FoundationModelsSession: AgentSession {
     init(
         manifest: AgentManifest,
         candidate: AgentModelCandidate,
-        configuration: AgentSessionConfiguration
+        configuration: AgentSessionConfiguration,
+        operations: FoundationModelsOperations? = nil
     ) throws {
         self.manifest = manifest
         self.candidate = candidate
@@ -271,9 +310,7 @@ actor FoundationModelsSession: AgentSession {
         }
 
         if let format = manifest.config.output?.format {
-            guard format.type == AgentOutputFormat.jsonSchemaType else {
-                throw AgentRuntimeError.unsupportedOutputFormat(format.type)
-            }
+            _ = try format.validatedSchema()
             self.structuredSchemaStorage = try GenerationSchemaBuilder.makeSchema(
                 toolName: "structured_output",
                 parameters: format.schema
@@ -282,17 +319,19 @@ actor FoundationModelsSession: AgentSession {
             self.structuredSchemaStorage = nil
         }
 
-        self.sessionStorage = LanguageModelSession(
+        let session = LanguageModelSession(
             tools: bridgedTools,
             instructions: manifest.config.systemPrompt
         )
+        self.sessionStorage = session
+        self.operationsStorage = operations ?? FoundationModelsOperations(session: session)
         self.engine = engine
     }
 
     /// Preloads Foundation Models session state so the first token of the
     /// first turn arrives faster. Safe to call once at conversation entry.
-    func prewarm() {
-        session.prewarm()
+    func prewarm() async {
+        await operations.prewarm()
     }
 
     private let engine: ToolExecutionEngine
@@ -346,12 +385,7 @@ actor FoundationModelsSession: AgentSession {
         if let schema = structuredSchema, let format = manifest.config.output?.format {
             // Structured turns run guided generation and deliver the payload
             // on the end frame; no chunk frames are emitted.
-            let response = try await session.respond(
-                to: text,
-                schema: schema,
-                includeSchemaInPrompt: true
-            )
-            let json = response.content.jsonString
+            let json = try await operations.respond(text, schema)
             structuredPayload = try format.decodeStructuredPayload(from: json)
             finalText = json
         } else if manifest.config.runtime.streaming {

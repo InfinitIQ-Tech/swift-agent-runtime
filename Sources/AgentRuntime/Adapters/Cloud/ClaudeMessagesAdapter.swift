@@ -50,10 +50,7 @@ public struct ClaudeMessagesAdapter: AgentRuntimeAdapter {
         guard let key = configuration.providerKeys[ProviderKeys.anthropicProvider] else {
             throw AgentRuntimeError.modelUnavailable(.missingProviderKey(provider: ProviderKeys.anthropicProvider))
         }
-        if let format = manifest.config.output?.format,
-           format.type != AgentOutputFormat.jsonSchemaType {
-            throw AgentRuntimeError.unsupportedOutputFormat(format.type)
-        }
+        _ = try manifest.config.output?.format.validatedSchema()
         return ClaudeMessagesSession(
             manifest: manifest,
             candidate: candidate,
@@ -218,6 +215,7 @@ actor ClaudeMessagesSession: AgentSession {
         var structuredPayload: JSONValue?
         if let format = manifest.config.output?.format {
             structuredPayload = try format.decodeStructuredPayload(from: finalRoundText)
+            turnText = finalRoundText
         }
 
         history.append(AgentMessage(role: .assistant, content: turnText))

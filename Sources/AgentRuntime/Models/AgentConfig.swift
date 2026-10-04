@@ -223,34 +223,17 @@ public struct AgentOutputFormat: Codable, Equatable, Sendable {
 }
 
 extension AgentOutputFormat {
-    /// Decodes provider output text as the structured payload for a
-    /// `json_schema` format, enforcing the schema's top-level type. Full
-    /// JSON Schema conformance is the provider's guarantee (guided
-    /// generation on-device, `output_config` in the cloud); this guards the
-    /// contract the caller depends on and surfaces violations as a typed error.
+    /// Decodes provider output and recursively checks the portable output
+    /// schema, including required properties, nested values and string enums.
     public func decodeStructuredPayload(from text: String) throws -> JSONValue {
+        let validator = try validatedSchema()
         guard let data = text.data(using: .utf8),
               let decoded = try? JSONDecoder().decode(JSONValue.self, from: data) else {
             throw AgentRuntimeError.structuredOutputInvalid(
                 "Provider returned non-JSON output for a json_schema format"
             )
         }
-        if let expected = schema["type"]?.stringValue {
-            let matches: Bool
-            switch expected {
-            case "object":
-                if case .object = decoded { matches = true } else { matches = false }
-            case "array":
-                if case .array = decoded { matches = true } else { matches = false }
-            default:
-                matches = true
-            }
-            guard matches else {
-                throw AgentRuntimeError.structuredOutputInvalid(
-                    "Provider returned a payload whose top-level type is not \"\(expected)\""
-                )
-            }
-        }
+        try validator.validate(decoded)
         return decoded
     }
 }
