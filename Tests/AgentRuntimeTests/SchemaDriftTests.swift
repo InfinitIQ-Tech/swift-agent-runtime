@@ -176,24 +176,37 @@ final class SchemaDriftTests: XCTestCase {
         }
     }
 
-    /// Byte-level comparison against the sibling spec-repo checkout. Skips
-    /// (not fails) when `../agent-config-spec` is absent, so CI environments
-    /// that clone only this repository still run the vendored assertions.
+    /// Local clones may omit the sibling, but CI supplies SPEC_REPO pointing
+    /// to the exact commit in scripts/public-schema-revision.txt and runs the
+    /// byte-level provenance gate. An explicitly configured missing checkout
+    /// is an error, never a skipped drift check.
     func testVendoredSchemaMatchesSiblingSpecRepoWhenPresent() throws {
-        let siblingURL = URL(fileURLWithPath: #filePath)
+        let configuredPath = ProcessInfo.processInfo.environment["SPEC_REPO"]
+        let defaultURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent() // AgentRuntimeTests
             .deletingLastPathComponent() // Tests
             .deletingLastPathComponent() // swift-agent-runtime
             .deletingLastPathComponent() // backend
-            .appendingPathComponent("agent-config-spec/schema/agent-config.v2.schema.json")
+            .appendingPathComponent("agent-config-spec")
+        let specURL = configuredPath.map { URL(fileURLWithPath: $0) } ?? defaultURL
+        let siblingURL = specURL.appendingPathComponent("schema/agent-config.v2.schema.json")
         guard FileManager.default.fileExists(atPath: siblingURL.path) else {
+            if configuredPath != nil {
+                return XCTFail("SPEC_REPO is missing the public schema; check out the pinned agent-config-spec revision")
+            }
             throw XCTSkip("sibling agent-config-spec checkout not present")
         }
-        let sibling = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: siblingURL))
-        let vendored = try loadVendoredSchema()
         XCTAssertEqual(
-            sibling, vendored,
+            try Data(contentsOf: siblingURL),
+            try Fixtures.resourceData("agent-config.v2.schema.json"),
             "vendored schema is stale — run scripts/sync-public-schema.sh"
         )
+        for example in ["on-device-story-agent.json", "portable-agent-config.json"] {
+            XCTAssertEqual(
+                try Data(contentsOf: specURL.appendingPathComponent("examples/\(example)")),
+                try Fixtures.resourceData(example),
+                "\(example) differs from public spec — run scripts/sync-public-schema.sh"
+            )
+        }
     }
 }
