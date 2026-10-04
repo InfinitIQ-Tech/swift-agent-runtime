@@ -25,11 +25,14 @@ public struct ProviderKeys: Sendable {
     public var providers: Set<String> { Set(storage.keys) }
 }
 
-extension ProviderKeys: CustomStringConvertible, CustomDebugStringConvertible {
+extension ProviderKeys: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
     public var description: String {
         "ProviderKeys(providers: \(providers.sorted()), keys: <redacted>)"
     }
     public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["providers": providers.sorted(), "keys": "<redacted>"], displayStyle: .struct)
+    }
 }
 
 /// Runtime-supplied configuration for a session. Everything here stays

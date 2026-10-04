@@ -1,12 +1,15 @@
 import AgentRuntime
+import RuntimeDemoSupport
+import CryptoKit
 import Foundation
+import Darwin
 
 // Minimal manifest-driven chat demo. Everything the agent is comes from the
 // checked-in AgentConfig manifest; no backend, no deployment, no tenant.
 //
 //   swift run agent-runtime-demo --manifest Manifests/story-companion.agentconfig.json --dry-run
 //   swift run agent-runtime-demo --manifest Manifests/story-companion.agentconfig.json
-//   ANTHROPIC_API_KEY=sk-... swift run agent-runtime-demo --manifest ...
+//   swift run agent-runtime-demo --manifest ... --adapter cloud --prompt-provider-key
 //
 // Adapter selection follows the manifest's model.candidates: on-device
 // Foundation Models when available (macOS 26 with Apple Intelligence),
@@ -19,6 +22,9 @@ func fail(_ message: String) -> Never {
 
 var manifestPath: String?
 var dryRun = false
+var adapterChoice = "automatic"
+var promptProviderKey = false
+var cloudSmokeTest = false
 var arguments = ArraySlice(CommandLine.arguments.dropFirst())
 while let argument = arguments.popFirst() {
     switch argument {
@@ -26,8 +32,17 @@ while let argument = arguments.popFirst() {
         manifestPath = arguments.popFirst()
     case "--dry-run":
         dryRun = true
+    case "--adapter":
+        guard let value = arguments.popFirst(), ["automatic", "cloud", "on-device"].contains(value) else {
+            fail("--adapter requires automatic, cloud, or on-device")
+        }
+        adapterChoice = value
+    case "--prompt-provider-key":
+        promptProviderKey = true
+    case "--cloud-smoke-test":
+        cloudSmokeTest = true
     case "--help", "-h":
-        print("usage: agent-runtime-demo --manifest <path> [--dry-run]")
+        print("usage: agent-runtime-demo --manifest <path> [--dry-run] [--adapter automatic|cloud|on-device] [--prompt-provider-key] [--cloud-smoke-test]")
         exit(0)
     default:
         fail("unknown argument \(argument)")
@@ -40,7 +55,20 @@ guard let manifestPath else {
 
 let manifest: AgentManifest
 do {
-    manifest = try AgentManifestLoader.load(contentsOf: URL(fileURLWithPath: manifestPath))
+    let data = try Data(contentsOf: URL(fileURLWithPath: manifestPath))
+    if cloudSmokeTest {
+        // The published cost ceiling is valid only for this exact pinned
+        // Haiku manifest, with its original prompt/tools and no server tools.
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        guard digest == "b8b521d2b48b5f69dab463302e4447498d45516db56f67b3c94048fd6b689733" else {
+            fail("--cloud-smoke-test requires the unchanged checked-in story manifest")
+        }
+        guard adapterChoice != "on-device" else {
+            fail("--cloud-smoke-test cannot use --adapter on-device")
+        }
+        adapterChoice = "cloud"
+    }
+    manifest = try AgentManifestLoader.load(data)
 } catch {
     fail("manifest failed to load: \(error)")
 }
@@ -50,8 +78,32 @@ print("Loaded agent \"\(config.name)\" (\(config.id) \(config.version), schema_v
 print("Model candidates: \(config.model.candidates.map(\.model).joined(separator: ", "))")
 
 var keys = ProviderKeys()
-if let anthropicKey = ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"] {
+if (promptProviderKey || cloudSmokeTest) && !dryRun {
+    // getpass reads from the controlling terminal with echo disabled. Never
+    // accept a key as an argument, place it in shell history, or print it.
+    guard isatty(STDIN_FILENO) == 1,
+          let input = getpass("Anthropic key (in memory only): ") else {
+        fail("secure key entry requires an interactive terminal")
+    }
+    keys[ProviderKeys.anthropicProvider] = String(cString: input)
+    memset(input, 0, strlen(input))
+    if cloudSmokeTest {
+        print("One Claude Haiku 4.5 request, 256 output tokens, standard tier. Conservative ceiling: US$0.21 before tax.")
+        print("Type SEND to initiate this paid request, or anything else to exit: ", terminator: "")
+        fflush(stdout)
+        guard readLine() == "SEND" else { exit(0) }
+    }
+} else if !dryRun, let anthropicKey = ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"] {
     keys[ProviderKeys.anthropicProvider] = anthropicKey
+}
+let adapters: [any AgentRuntimeAdapter]
+switch adapterChoice {
+case "cloud":
+    adapters = cloudSmokeTest
+        ? [ClaudeMessagesAdapter(maxTokens: 256, transport: SingleRequestCloudTransport())]
+        : [ClaudeMessagesAdapter()]
+case "on-device": adapters = [FoundationModelsAdapter()]
+default: adapters = AgentRuntimeResolver.defaultAdapters()
 }
 let configuration = AgentSessionConfiguration(
     providerKeys: keys,
@@ -61,7 +113,7 @@ let configuration = AgentSessionConfiguration(
     }
 )
 
-let availability = AgentRuntimeResolver.availability(manifest: manifest, configuration: configuration)
+let availability = AgentRuntimeResolver.availability(manifest: manifest, configuration: configuration, adapters: adapters)
 print("Runtime availability: \(availability)")
 
 if dryRun {
@@ -70,20 +122,28 @@ if dryRun {
 }
 
 guard availability.isAvailable else {
-    fail("no adapter available — run on a Foundation Models device or set ANTHROPIC_API_KEY")
+    fail("no adapter available — use an eligible Foundation Models device or --prompt-provider-key for cloud")
 }
 
 let session: any AgentSession
 do {
-    session = try AgentRuntimeResolver.makeSession(manifest: manifest, configuration: configuration)
+    session = try AgentRuntimeResolver.makeSession(manifest: manifest, configuration: configuration, adapters: adapters)
 } catch {
     fail("could not open session: \(error)")
 }
 
-print("Type a message (ctrl-d to exit).")
+if !cloudSmokeTest { print("Type a message (ctrl-d to exit).") }
 runLoop: while true {
-    print("\n> ", terminator: "")
-    guard let line = readLine(), !line.isEmpty else { break }
+    let line: String
+    if cloudSmokeTest {
+        line = "Tell a gentle two-sentence bedtime story about a moon rabbit. Do not save it or use tools."
+        print("\n> \(line)")
+    } else {
+        print("\n> ", terminator: "")
+        fflush(stdout)
+        guard let input = readLine(), !input.isEmpty else { break }
+        line = input
+    }
 
     let events = await session.send(line)
     do {
@@ -93,12 +153,13 @@ runLoop: while true {
                 print("[turn \(start.turn) on \(start.model)]")
             case .chunk(let delta):
                 print(delta, terminator: "")
+                fflush(stdout)
             case .toolCall(let call):
                 print("\n[tool call: \(call.toolId)]")
             case .toolResult(let result):
                 print("[tool result: \(result.toolId) success=\(result.success)]")
             case .end(let result):
-                if !manifest.config.runtime.streaming {
+                if !manifest.config.runtime.streaming || manifest.config.output != nil {
                     print(result.text, terminator: "")
                 }
                 print("")
@@ -113,4 +174,5 @@ runLoop: while true {
     } catch {
         fail("turn failed: \(error)")
     }
+    if cloudSmokeTest { break }
 }
