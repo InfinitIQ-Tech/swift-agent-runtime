@@ -11,11 +11,26 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
+      - name: Read public schema revision
+        id: public-schema
+        run: echo "revision=$(cat scripts/public-schema-revision.txt)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: InfinitIQ-Tech/agent-config-spec
+          ref: ${{ steps.public-schema.outputs.revision }}
+          path: .public-schema
+          persist-credentials: false
+      - name: Verify pinned public schema and examples
+        env:
+          SPEC_REPO: ${{ github.workspace }}/.public-schema
+        run: scripts/verify-public-schema.sh
       - name: Swift version
         run: swift --version
       - name: Build (macOS)
         run: swift build
       - name: Test
+        env:
+          SPEC_REPO: ${{ github.workspace }}/.public-schema
         run: swift test
       - name: Build (iOS Simulator, iOS 17 floor)
         run: xcodebuild -scheme AgentRuntime -destination "generic/platform=iOS Simulator" build
