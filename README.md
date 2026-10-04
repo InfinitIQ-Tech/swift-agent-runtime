@@ -102,15 +102,53 @@ if AgentRuntimeResolver.availability(manifest: manifest).isAvailable { ... }
 
 Building requires the Xcode 26 SDK.
 
-## Demo
+## SwiftUI demo (iOS + macOS)
+
+Open `Demo/AgentRuntimeDemo.xcodeproj`, select the `AgentRuntimeDemo` scheme,
+and run on **My Mac** or an iOS Simulator/device. The checked-in project links
+this local package; no project generator, backend, account, or package download
+is needed. A physical iOS device requires the developer's own signing team.
+Xcode 26 is required; deployment floors remain iOS 17 and macOS 15.
+
+The app bundles `Manifests/story-companion.agentconfig.json` directly. The
+manifest supplies the agent name, system prompt, candidate order, native tool,
+and six-turn limit. The normal runtime resolver uses Foundation Models on an
+eligible Apple Intelligence device. If unavailable, Connection accepts an
+optional Anthropic key for the manifest's cloud fallback. Cloud execution
+requires network access to Anthropic; local model execution needs no backend.
+The secure field is cleared after connecting or closing the sheet. Keys,
+conversations, and the demo story library are never persisted.
+
+Chat displays streamed or final-only responses, tool events, and remaining
+turns. Stop, backgrounding, or a generation failure interrupts the session;
+New conversation creates a fresh session and clears the transcript. Repeated
+sends are disabled while work is running. The native `save_story` tool stores
+stories in the window's in-memory Saved stories library, which survives
+conversation resets and disappears when the window closes. Tools requiring
+confirmation are not automatically approved.
+
+A simulator or older OS can show model-unavailable state normally. For
+repeatable UI verification without a model/key, add `--demo-simulation` to
+the Debug scheme's launch arguments. This explicitly labeled simulation uses
+the bundled manifest and an injected session, makes no provider calls, and is
+excluded from Release builds. `slow`, `fail`, `final`, and `save` exercise
+interruption, safe errors, final-only text, and the native tool respectively;
+other text produces a simulated reply. This is UI evidence, not model-quality
+or live-provider evidence.
+
+The original CLI remains available:
 
 ```sh
 # validate a manifest (no network, no backend)
 swift run agent-runtime-demo --manifest Manifests/story-companion.agentconfig.json --dry-run
 
-# chat on-device (Apple Intelligence device) or via cloud (ANTHROPIC_API_KEY set)
+# chat on-device, or via cloud with ANTHROPIC_API_KEY in the process environment
 swift run agent-runtime-demo --manifest Manifests/story-companion.agentconfig.json
 ```
+
+Maintainers can regenerate the checked-in Xcode project from `Demo/project.yml`
+with XcodeGen (`xcodegen generate --spec Demo/project.yml`; generated with 2.45.4).
+Ordinary app builds do not require XcodeGen or any third-party package.
 
 ## Contract drift
 
@@ -125,9 +163,37 @@ and that the vendored schema and examples are byte-identical. A missing explicit
 `SPEC_REPO` fails verification.
 
 CI checks out the pinned public spec and runs the external verification gate
-alongside `SchemaDriftTests`. The tests detect differences between the runtime
-models and public schema, including a simulated `schema_version` bump the
-runtime does not support.
+alongside `SchemaDriftTests`. The tests compare structural expectations and
+exercise the actual runtime Codable models with schema-generated payloads.
+`scripts/prove-schema-drift.sh` runs the real gate against an isolated simulated
+`schema_version` bump, checks that it fails for the expected reason, and leaves
+the checked-in schema untouched. The normal clean-schema run must pass first.
+
+## Platform verification
+
+The same script runs locally and in CI:
+
+```sh
+CI_VERIFICATION_DIR=/tmp/agent-runtime-verification scripts/ci-platform-tests.sh macos
+CI_VERIFICATION_DIR=/tmp/agent-runtime-verification scripts/ci-platform-tests.sh ios
+scripts/prove-schema-drift.sh
+```
+
+The scripts run runtime/model tests, Release app builds, and Debug Simulation
+UI tests. iOS verification includes Simulator and unsigned device-SDK builds;
+it does not establish physical-device execution. `IOS_SIMULATOR_ID` selects
+an installed iPhone simulator; otherwise the newest available one is selected.
+Logs and result bundles are stored in a separate timestamped run directory.
+Using `/tmp` avoids Finder metadata that can invalidate local app signing in
+some Documents folders. Mac builds use ad hoc signing without a development
+team; device installation requires a developer signing configuration.
+
+macOS XCTest UI tests also require the host's UI Automation authorization.
+`automationmodetool` with no arguments reports its status without changing it.
+If Automation Mode is disabled and authentication is required, the host owner
+must authorize UI testing before the Mac suite can run. A runner startup
+failure is not a passing UI result. Verification details and limitations are
+recorded in `features/demo-app/spec_log.md`.
 
 ## Development
 

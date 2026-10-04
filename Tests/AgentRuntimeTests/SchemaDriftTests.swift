@@ -67,7 +67,15 @@ final class SchemaDriftTests: XCTestCase {
     ]
 
     private func loadVendoredSchema() throws -> JSONValue {
-        try JSONDecoder().decode(JSONValue.self, from: Fixtures.resourceData("agent-config.v2.schema.json"))
+        // Used only by scripts/prove-schema-drift.sh to run the real gate
+        // against a temporary changed contract, without touching vendored bytes.
+        let data: Data
+        if let path = ProcessInfo.processInfo.environment["SCHEMA_DRIFT_TEST_SCHEMA"] {
+            data = try Data(contentsOf: URL(fileURLWithPath: path))
+        } else {
+            data = try Fixtures.resourceData("agent-config.v2.schema.json")
+        }
+        return try JSONDecoder().decode(JSONValue.self, from: data)
     }
 
     /// Compares a schema document against the runtime's expectations and
@@ -126,6 +134,125 @@ final class SchemaDriftTests: XCTestCase {
     func testVendoredSchemaMatchesRuntimeModels() throws {
         let findings = Self.driftFindings(in: try loadVendoredSchema())
         XCTAssertEqual(findings, [], findings.joined(separator: "\n"))
+    }
+
+    /// Exercise the real Codable implementations, not just the hand-maintained
+    /// property list above. Both full and required-only documents are generated
+    /// from the public schema, so changed wire keys, field types, optionality,
+    /// and fields silently dropped by a decoder cannot pass by editing a mirror.
+    func testSchemaGeneratedDocumentsMatchActualRuntimeCodableTypes() throws {
+        let schema = try loadVendoredSchema()
+        try checkCodable(AgentConfig.self, name: "#root", schema: schema)
+        try checkCodable(AgentRuntimeConfig.self, schema: schema)
+        try checkCodable(AgentModelCandidate.self, schema: schema)
+        try checkCodable(AgentModelConfig.self, schema: schema)
+        try checkCodable(AgentMemoryConfig.self, schema: schema)
+        try checkCodable(AgentRetrievalConfig.self, schema: schema)
+        try checkCodable(ToolEndpoint.self, schema: schema)
+        try checkCodable(ToolDefinition.self, schema: schema)
+        try checkCodable(AgentToolPolicy.self, schema: schema)
+        try checkCodable(AgentToolsConfig.self, schema: schema)
+        try checkCodable(AgentGuardrailsConfig.self, schema: schema)
+        try checkCodable(AgentOutputFormat.self, schema: schema)
+        try checkCodable(AgentOutputConfig.self, schema: schema)
+
+        let document = try Self.sample(for: schema, root: schema, requiredOnly: false)
+        let manifest = try AgentManifestLoader.load(JSONEncoder().encode(document))
+        XCTAssertEqual(manifest.document, document, "schema-generated manifest must load without loss")
+    }
+
+    private func checkCodable<T: Codable>(
+        _ type: T.Type,
+        name: String? = nil,
+        schema: JSONValue
+    ) throws {
+        let name = name ?? String(describing: type)
+        let node = try XCTUnwrap(name == "#root" ? schema : schema["$defs"]?[name], name)
+        let decoder = JSONDecoder()
+        let encoder = JSONEncoder()
+        for requiredOnly in [false, true] {
+            let document = try Self.sample(for: node, root: schema, requiredOnly: requiredOnly)
+            let decoded = try decoder.decode(type, from: encoder.encode(document))
+            let roundTrip = try decoder.decode(JSONValue.self, from: encoder.encode(decoded))
+            XCTAssertEqual(roundTrip, document, "\(name): actual Codable wire surface differs from schema (requiredOnly: \(requiredOnly))")
+        }
+
+        guard case .object(let members) = try Self.sample(for: node, root: schema, requiredOnly: false) else {
+            return XCTFail("\(name) must be an object")
+        }
+        if case .array(let required)? = node["required"] {
+            for key in required.compactMap(\.stringValue) {
+                var missingRequired = members
+                missingRequired.removeValue(forKey: key)
+                XCTAssertThrowsError(
+                    try decoder.decode(type, from: encoder.encode(JSONValue.object(missingRequired))),
+                    "\(name).\(key) is schema-required but the runtime decoder accepts its absence"
+                )
+            }
+        }
+    }
+
+    /// A deliberately small fixture generator for this contract's schema
+    /// vocabulary. It fails on unsupported shapes instead of inventing values.
+    private static func sample(for node: JSONValue, root: JSONValue, requiredOnly: Bool) throws -> JSONValue {
+        if let ref = node["$ref"]?.stringValue {
+            let prefix = "#/$defs/"
+            guard ref.hasPrefix(prefix), let target = root["$defs"]?[String(ref.dropFirst(prefix.count))] else {
+                throw FixtureError.unsupported("Unresolved reference: \(ref)")
+            }
+            return try sample(for: target, root: root, requiredOnly: requiredOnly)
+        }
+        if case .array(let values)? = node["enum"], let value = values.first(where: { $0 != .null }) {
+            return value
+        }
+        if case .array(let choices)? = node["anyOf"],
+           let choice = choices.first(where: { $0["type"]?.stringValue != "null" }) {
+            return try sample(for: choice, root: root, requiredOnly: requiredOnly)
+        }
+        let type: String?
+        if case .array(let types)? = node["type"] {
+            type = types.compactMap(\.stringValue).first(where: { $0 != "null" })
+        } else {
+            type = node["type"]?.stringValue
+        }
+        switch type {
+        case "string": return .string("schema-fixture")
+        case "integer": return .integer(7)
+        case "number": return .number(1.5)
+        case "boolean": return .bool(true)
+        case "array":
+            guard let items = node["items"] else { throw FixtureError.unsupported("Array has no items schema") }
+            return .array([try sample(for: items, root: root, requiredOnly: requiredOnly)])
+        case "object":
+            guard case .object(let properties)? = node["properties"] else {
+                if let additional = node["additionalProperties"], case .object = additional {
+                    return .object(["sample": try sample(for: additional, root: root, requiredOnly: requiredOnly)])
+                }
+                return .object(["sample": .string("preserved"), "nested": .array([.integer(7), .bool(true), .null])])
+            }
+            let keys: Set<String>
+            if requiredOnly {
+                if case .array(let required)? = node["required"] {
+                    keys = Set(required.compactMap(\.stringValue))
+                } else {
+                    keys = []
+                }
+            } else {
+                keys = Set(properties.keys)
+            }
+            var members: [String: JSONValue] = [:]
+            for key in keys {
+                guard let property = properties[key] else { throw FixtureError.unsupported("Required property missing: \(key)") }
+                members[key] = try sample(for: property, root: root, requiredOnly: requiredOnly)
+            }
+            return .object(members)
+        default:
+            throw FixtureError.unsupported("Unrecognized fixture schema: \(node)")
+        }
+    }
+
+    private enum FixtureError: Error {
+        case unsupported(String)
     }
 
     func testSimulatedSchemaVersionBumpIsDetected() throws {

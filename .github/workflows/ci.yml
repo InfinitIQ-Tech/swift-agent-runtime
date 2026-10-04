@@ -9,6 +9,16 @@ jobs:
   test:
     # Foundation Models code paths require the macOS 26 SDK (Xcode 26).
     runs-on: macos-26
+    name: Runtime and demo (${{ matrix.platform }})
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos, ios]
+    env:
+      SPEC_REPO: ${{ github.workspace }}/.public-schema
+      CI_VERIFICATION_DIR: ${{ github.workspace }}/.build/ci-verification
+      SCHEMA_DRIFT_LOG_DIR: ${{ github.workspace }}/.build/ci-verification/schema-drift
     steps:
       - uses: actions/checkout@v4
       - name: Read public schema revision
@@ -21,18 +31,27 @@ jobs:
           path: .public-schema
           persist-credentials: false
       - name: Verify pinned public schema and examples
-        env:
-          SPEC_REPO: ${{ github.workspace }}/.public-schema
         run: scripts/verify-public-schema.sh
-      - name: Swift version
-        run: swift --version
-      - name: Build (macOS)
-        run: swift build
-      - name: Test
-        env:
-          SPEC_REPO: ${{ github.workspace }}/.public-schema
-        run: swift test
-      - name: Build (iOS Simulator, iOS 17 floor)
-        run: xcodebuild -scheme AgentRuntime -destination "generic/platform=iOS Simulator" build
+      - name: Toolchain versions
+        run: |
+          swift --version
+          xcodebuild -version
+      - name: Prove real drift gate rejects an isolated schema bump
+        if: matrix.platform == 'macos'
+        run: scripts/prove-schema-drift.sh
+      - name: Build and test runtime, demo model, and SwiftUI app
+        run: scripts/ci-platform-tests.sh "${{ matrix.platform }}"
       - name: Demo dry run (no backend, no network)
+        if: matrix.platform == 'macos'
         run: swift run agent-runtime-demo --manifest Manifests/story-companion.agentconfig.json --dry-run
+      - name: Upload verification logs and XCTest results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-${{ matrix.platform }}
+          path: |
+            .build/ci-verification/**/*.log
+            .build/ci-verification/**/*.xcresult
+            .build/ci-verification/**/simulators.json
+          include-hidden-files: true
+          if-no-files-found: warn

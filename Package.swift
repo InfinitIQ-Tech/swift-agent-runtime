@@ -12,6 +12,7 @@ let package = Package(
     ],
     products: [
         .library(name: "AgentRuntime", targets: ["AgentRuntime"]),
+        .library(name: "RuntimeDemoSupport", targets: ["RuntimeDemoSupport"]),
         .executable(name: "agent-runtime-demo", targets: ["agent-runtime-demo"])
     ],
     targets: [
@@ -23,6 +24,8 @@ let package = Package(
             name: "agent-runtime-demo",
             dependencies: ["AgentRuntime"]
         ),
+        .target(name: "RuntimeDemoSupport", dependencies: ["AgentRuntime"]),
+        .testTarget(name: "RuntimeDemoSupportTests", dependencies: ["RuntimeDemoSupport"]),
         .testTarget(
             name: "AgentRuntimeTests",
             dependencies: ["AgentRuntime"],
