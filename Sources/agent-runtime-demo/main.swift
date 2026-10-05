@@ -63,6 +63,12 @@ if let smokeStatusPath {
     catch { fail("smoke status file could not be created") }
 }
 
+// Process-level cancellation is opt-in to the owner-run smoke flow. The
+// handler restores terminal attributes and records only a fixed outcome.
+let smokeInterruptHandler = cloudSmokeTest && !dryRun
+    ? CloudSmokeInterruptHandler(status: smokeStatus)
+    : nil
+
 guard let manifestPath else {
     fail("--manifest <path> is required")
 }
@@ -101,8 +107,17 @@ if (promptProviderKey || cloudSmokeTest) && !dryRun {
     smokeStatus?.record(.credentialEntryRequested)
     do {
         keys[ProviderKeys.anthropicProvider] = try readSecureProviderKey()
+        guard let enteredKey = keys[ProviderKeys.anthropicProvider],
+              !enteredKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            fail("no provider key entered", category: .credentialEntry)
+        }
     } catch SecureKeyReaderError.inputTooLong {
         fail("provider key input is too long", category: .credentialEntry)
+    } catch SecureKeyReaderError.interrupted {
+        smokeInterruptHandler?.finishInterruptedRead()
+        fail("provider key entry cancelled", category: .cancelled)
+    } catch SecureKeyReaderError.invalidEncoding {
+        fail("provider key input is not valid UTF-8", category: .credentialEntry)
     } catch {
         fail("secure key entry requires an interactive terminal", category: .credentialEntry)
     }
@@ -110,7 +125,13 @@ if (promptProviderKey || cloudSmokeTest) && !dryRun {
         print("Type SEND to send the request, or anything else to exit: ", terminator: "")
         fflush(stdout)
         smokeStatus?.record(.awaitingSend)
-        guard readLine() == "SEND" else {
+        errno = 0
+        let confirmation = readLine()
+        if confirmation == nil && errno == EINTR {
+            smokeInterruptHandler?.finishInterruptedRead()
+            fail("request confirmation cancelled", category: .cancelled)
+        }
+        guard confirmation == "SEND" else {
             smokeStatus?.record(.ownerDeclined)
             exit(0)
         }
@@ -172,13 +193,11 @@ runLoop: while true {
 
     let events = await session.send(line)
     do {
-        for try await event in events {
+        try await consumeDemoTurn(events, status: smokeStatus) { event in
             switch event {
             case .start(let start):
-                smokeStatus?.record(.turnStarted)
                 print("[turn \(start.turn) on \(start.model)]")
             case .chunk(let delta):
-                if !delta.isEmpty { smokeStatus?.record(.streaming) }
                 print(delta, terminator: "")
                 fflush(stdout)
             case .toolCall(let call):
@@ -186,7 +205,6 @@ runLoop: while true {
             case .toolResult(let result):
                 print("[tool result: \(result.toolId) success=\(result.success)]")
             case .end(let result):
-                smokeStatus?.record(.completed)
                 if !manifest.config.runtime.streaming || manifest.config.output != nil {
                     print(result.text, terminator: "")
                 }
@@ -197,6 +215,9 @@ runLoop: while true {
             }
         }
     } catch AgentRuntimeError.maxTurnsExceeded(let limit) {
+        if cloudSmokeTest {
+            fail("cloud smoke turn limit reached", category: .turnLimit)
+        }
         smokeStatus?.record(.failed, failure: .turnLimit)
         print("\n[max_turns (\(limit)) reached — session complete]")
         break runLoop

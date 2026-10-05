@@ -6,12 +6,14 @@ enum SecureKeyReaderError: Error, CustomStringConvertible {
     case terminalUnavailable
     case inputTooLong
     case invalidEncoding
+    case interrupted
 
     var description: String {
         switch self {
         case .terminalUnavailable: "secure key entry requires an interactive terminal"
         case .inputTooLong: "provider key input exceeds the supported length"
         case .invalidEncoding: "provider key input is not valid UTF-8"
+        case .interrupted: "provider key entry was cancelled"
         }
     }
 }
@@ -30,7 +32,10 @@ func readSecureProviderKey() throws -> String {
     return try buffer.withUnsafeMutableBufferPointer { bytes in
         guard let input = readpassphrase(
             "Anthropic key (in memory only): ", bytes.baseAddress, bytes.count, RPP_REQUIRE_TTY
-        ) else { throw SecureKeyReaderError.terminalUnavailable }
+        ) else {
+            if errno == EINTR { throw SecureKeyReaderError.interrupted }
+            throw SecureKeyReaderError.terminalUnavailable
+        }
         let length = strnlen(input, bytes.count)
         guard length < bytes.count - 1 else { throw SecureKeyReaderError.inputTooLong }
         let utf8 = UnsafeBufferPointer(start: input, count: length).map { UInt8(bitPattern: $0) }

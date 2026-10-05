@@ -25,7 +25,8 @@ class CloudSmokePromptTests(unittest.TestCase):
         self.assertTrue(prompts, "owner action prompt missing")
         self.assertTrue(any("SEND" in prompt for prompt in prompts))
         self.assertIsNone(re.search(r"budget|cost|price|paid|tax|ceiling|US\$", " ".join(prompts), re.I))
-        self.assertIn('guard readLine() == "SEND"', branch)
+        self.assertIn('let confirmation = readLine()', branch)
+        self.assertIn('guard confirmation == "SEND"', branch)
 
     def test_dry_run_bypasses_key_and_send_prompts(self):
         result = subprocess.run(

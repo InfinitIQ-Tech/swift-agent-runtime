@@ -155,8 +155,8 @@ output and tool-round limits and does not share this smoke-test cost bound.
 
 3. The CLI sends its fixed short story prompt. Verify the start line names
    `anthropic:claude-haiku-4-5`, text appears incrementally, and successful
-   completion shows `[5 turns remaining]`. The remaining-turn line comes from
-   the `end` event; a start line alone is not successful acceptance. A tool
+   completion shows `[5 turns remaining]`. The remaining-turn line requires exactly one
+   `end` and clean stream closure; a start line alone is not successful acceptance. A tool
    request cannot trigger a second paid request; the resulting failure is
    unsuccessful acceptance. Truncation, provider errors, or missing completion
    must also be recorded as observed. A retry is a new invocation and must be
@@ -188,6 +188,17 @@ acceptance remains separately tracked in
 [AF-84](https://infinitiqtech.atlassian.net/browse/AF-84).
 
 ## Optional credential-free status file
+
+Completion display and `completed` status require exactly one `end` followed by
+clean stream closure, without a later event, error or cancellation. EOF without
+an `end` fails. The first terminal status is final; late callbacks cannot replace
+it or regress its milestones. Smoke failures, including exhaustion of the
+one-request budget, exit nonzero. Empty key input or EOF fails credential entry.
+Catchable SIGINT, SIGTERM and SIGHUP record cancellation and restore terminal
+echo, including interruption during protected entry. SIGKILL, a crash or power
+loss cannot guarantee a final write or cleanup. A nonterminal snapshot left
+behind is an unknown outcome, never proof that the process remains alive.
+These safeguards add no owner interaction or budget gate.
 
 `--smoke-status-file <path>` is opt-in and accepted only with a non-dry
 `--cloud-smoke-test`. Without the flag, the CLI creates no status file. The
@@ -229,7 +240,7 @@ and does not establish that the TTY was opened, echo was disabled, or the
 prompt is ready for input. `awaiting_send` means the reader returned and the CLI
 is waiting for owner confirmation. `request_started` records a local transport
 attempt, not provider receipt. A 200 response or `turn_started` alone is not
-successful completion. `completed` records the runtime end event; live streaming
+successful completion. `completed` requires exactly one end and clean stream closure; live streaming
 evidence additionally requires `streamed: true` and the matching fresh
 revision/manifest/run identity. No status snapshot substitutes for a verified
 owner-run result.

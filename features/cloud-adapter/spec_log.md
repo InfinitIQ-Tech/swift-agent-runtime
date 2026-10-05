@@ -1,5 +1,12 @@
 # Cloud adapter spec log
 
+## 2026-10-05 — CLI completion and interruption evidence
+
+- Completion display/status requires exactly one `end` and clean stream closure. Missing/duplicate ends, later frames/errors and cancellation cannot publish success; first terminal status is final. Smoke exhaustion exits nonzero; empty key/EOF fails entry. Catchable SIGINT/SIGTERM/SIGHUP record cancellation and restore echo. SIGKILL/crash/power loss may leave an unknown nonterminal snapshot, never evidence of an active process. No owner/budget gate was added.
+- Actual-source outcome checks passed 24 tests (12 status + 12 consumer), zero failures, in `verification/cloud-smoke-outcome-tests.log`. Synthetic owner-flow checks passed 10 tests covering 22 scenarios, zero failures/skips, in `cli-interruption-final-owner-flow.log`. Only synthetic fixtures and their own PTYs were used; no provider call or owner Terminal inspection occurred. These counts are separate from package totals.
+- macOS package recovery passed 156 tests, zero failures/skips, in 40.09 seconds (`package-final-recovery-2026-10-05.log`) after an initial 120-second timeout. iOS package recovery passed 156 tests, zero failures, in 19.72 seconds using a fresh derived-data cache and four jobs (`ios-package-recovery-20261005.log`) after an initial 240-second timeout before tests. Final source-hash comparison, Release checks, review and commit capture remain pending the parent handoff.
+- Live cloud acceptance remains unverified. Launch, Terminal inspection and publication were denied; no retry or external write was made for this documentation update.
+
 ## 2026-10-04 — Resumed final verification
 
 - Final resumed CLI source passed `swift test`: 156 tests, zero failures/skips (132 XCTest + 24 Swift Testing). The macOS Release full-package build and generic iOS Simulator/device SDK Release CLI builds all passed; the pinned schema/examples gate passed. Runtime, demo support, app/UI and package-test sources remain identical to the previously verified implementation.

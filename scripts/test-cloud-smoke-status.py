@@ -3,7 +3,7 @@
 
 The temporary SwiftPM harness depends only on the local AgentRuntime product.
 It never runs the demo, opens a terminal, reads input or inherited environment,
-instantiates the observed transport, or accesses provider credentials. Test
+uses a real network transport, or accesses provider credentials. Test
 payloads are synthetic canaries. Each invocation has a 120-second deadline.
 """
 
@@ -64,8 +64,8 @@ final class CloudSmokeStatusTests: XCTestCase, @unchecked Sendable {
     }
 
     func testEveryStageSerializesOnlyAnAllowedIdentifier() throws {
-        try withStatus { status, url in
-            for (stage, expected) in stages {
+        for (stage, expected) in stages {
+            try withStatus { status, url in
                 status.record(stage)
                 let snapshot = try read(url)
                 XCTAssertEqual(Set(snapshot.keys), requiredKeys)
@@ -76,8 +76,8 @@ final class CloudSmokeStatusTests: XCTestCase, @unchecked Sendable {
     }
 
     func testEveryFailureSerializesOnlyAnAllowedIdentifier() throws {
-        try withStatus { status, url in
-            for (failure, expected) in failures {
+        for (failure, expected) in failures {
+            try withStatus { status, url in
                 status.record(.failed, failure: failure)
                 let snapshot = try read(url)
                 XCTAssertEqual(Set(snapshot.keys), requiredKeys.union(["failure"]))
@@ -102,6 +102,7 @@ final class CloudSmokeStatusTests: XCTestCase, @unchecked Sendable {
             (AgentRuntimeError.guardrailViolation, "guardrail"),
             (AgentRuntimeError.contextWindowExceeded, "context_limit"),
             (AgentRuntimeError.cancelled, "cancelled"),
+            (CancellationError(), "cancelled"),
             (AgentRuntimeError.maxTurnsExceeded(limit: Int.max), "turn_limit"),
             (AgentRuntimeError.toolNotAllowed(payload), "tool"),
             (AgentRuntimeError.toolNotRegistered(payload), "tool"),
@@ -114,8 +115,8 @@ final class CloudSmokeStatusTests: XCTestCase, @unchecked Sendable {
             (AgentRuntimeError.generationFailed("Messages API transport failed " + payload), "network"),
             (AgentRuntimeError.generationFailed("prefix Messages API transport failed " + payload), "generation")
         ]
-        try withStatus { status, url in
-            for (error, expected) in cases {
+        for (error, expected) in cases {
+            try withStatus { status, url in
                 status.record(.failed, failure: .classify(error))
                 let snapshot = try read(url)
                 XCTAssertEqual(Set(snapshot.keys), requiredKeys.union(["failure"]))
@@ -133,11 +134,10 @@ final class CloudSmokeStatusTests: XCTestCase, @unchecked Sendable {
                 "request": ["x-api-key": Self.canary],
                 "response": String(repeating: Self.canary, count: 4096)
             ]),
-            URLError(.notConnectedToInternet),
-            CancellationError()
+            URLError(.notConnectedToInternet)
         ]
-        try withStatus { status, url in
-            for error in errors {
+        for error in errors {
+            try withStatus { status, url in
                 status.record(.failed, failure: .classify(error))
                 XCTAssertEqual(try read(url)["failure"] as? String, "unknown")
                 try assertNoPayload(at: url)
@@ -217,7 +217,7 @@ final class CloudSmokeStatusTests: XCTestCase, @unchecked Sendable {
                 case 0: status.record(.requestStarted)
                 case 1: status.record(.responseReceived, httpStatus: 200)
                 case 2: status.record(.streaming)
-                default: status.record(.failed, failure: .network)
+                default: status.record(.turnStarted)
                 }
                 // Concurrent readers see a complete old or new JSON snapshot.
                 do {
@@ -233,6 +233,34 @@ final class CloudSmokeStatusTests: XCTestCase, @unchecked Sendable {
             XCTAssertEqual(snapshot["httpStatus"] as? Int, 200)
             XCTAssertEqual(snapshot["streamed"] as? Bool, true)
             XCTAssertNil(snapshot["failure"])
+        }
+    }
+
+    func testProgressNeverRegressesWhenTransportOvertakesConsumer() throws {
+        try withStatus { status, url in
+            status.record(.requestStarted)
+            status.record(.responseReceived, httpStatus: 200)
+            status.record(.turnStarted)
+            XCTAssertEqual(try read(url)["stage"] as? String, "response_received")
+            status.record(.streaming)
+            status.record(.responseReceived, httpStatus: 200)
+            XCTAssertEqual(try read(url)["stage"] as? String, "streaming")
+        }
+    }
+
+    func testEveryTerminalOutcomeRejectsAllLateUpdates() throws {
+        for terminal: CloudSmokeStatus.Stage in [.completed, .failed, .ownerDeclined] {
+            try withStatus { status, url in
+                status.record(.requestStarted)
+                status.record(.responseReceived, httpStatus: 200)
+                status.record(.streaming)
+                status.record(terminal, failure: terminal == .failed ? .cancelled : nil)
+                let settled = try Data(contentsOf: url)
+                for (lateStage, _) in stages {
+                    status.record(lateStage, failure: .unknown, httpStatus: 401)
+                    XCTAssertEqual(try Data(contentsOf: url), settled)
+                }
+            }
         }
     }
 
@@ -265,6 +293,231 @@ final class CloudSmokeStatusTests: XCTestCase, @unchecked Sendable {
 '''
 
 
+TURN_TESTS = r'''
+import AgentRuntime
+import Foundation
+import XCTest
+@testable import CloudSmokeStatusHarness
+
+@MainActor
+final class DemoTurnTests: XCTestCase {
+    private let canary = "synthetic-noncredential-status-canary"
+
+    func testClaudeSuccessCompletesOnlyAfterCleanStreamFinish() async throws {
+        try await withStatus { status, url in
+            let session = try makeSession(status: status, lines: Self.completeLines)
+            var ends = 0
+            try await consumeDemoTurn(await session.send("test"), status: status) { event in
+                if case .end = event {
+                    ends += 1
+                    XCTAssertNotEqual(try read(url)["stage"] as? String, "completed")
+                }
+            }
+            XCTAssertEqual(ends, 1)
+            try assertSnapshot(url, stage: "completed", failure: nil, request: true, http: 200, streamed: true)
+        }
+    }
+
+    func testClaudeAuthenticationFailurePreservesHTTPStatusWithoutPayload() async throws {
+        try await withStatus { status, url in
+            let session = try makeSession(status: status, statusCode: 401, lines: [canary])
+            await assertFailure(await session.send("test"), status: status)
+            try assertSnapshot(url, stage: "failed", failure: "authentication", request: true, http: 401, streamed: false)
+        }
+    }
+
+    func testClaudeMalformedEOFFailsAfterChunkWithoutAnEnd() async throws {
+        try await withStatus { status, url in
+            let session = try makeSession(status: status, lines: Self.partialLines)
+            await assertFailure(await session.send("test"), status: status)
+            try assertSnapshot(url, stage: "failed", failure: "invalid_response", request: true, http: 200, streamed: true)
+        }
+    }
+
+    func testClaudePostChunkTransportErrorRetainsStreamingEvidence() async throws {
+        try await withStatus { status, url in
+            let session = try makeSession(status: status, lines: Self.partialLines, failure: AgentRuntimeError.generationFailed(canary))
+            await assertFailure(await session.send("test"), status: status)
+            try assertSnapshot(url, stage: "failed", failure: "network", request: true, http: 200, streamed: true)
+        }
+    }
+
+    func testClaudeCancellationDoesNotBecomeSuccessfulEOF() async throws {
+        try await withStatus { status, url in
+            let session = try makeSession(status: status, lines: Self.partialLines, failure: CancellationError())
+            await assertFailure(await session.send("test"), status: status)
+            try assertSnapshot(url, stage: "failed", failure: "cancelled", request: true, http: 200, streamed: true)
+        }
+    }
+
+    func testEmptyAndChunkOnlyStreamsRequireAnEnd() async throws {
+        for frames: [AgentStreamEvent] in [[], [.chunk("partial")]] {
+            try await withStatus { status, url in
+                await assertFailure(stream(frames), status: status)
+                try assertSnapshot(url, stage: "failed", failure: "invalid_response", request: false, http: nil, streamed: !frames.isEmpty)
+            }
+        }
+    }
+
+    func testEndFollowedByDuplicateOrOtherEventFailsBeforeForwardingExtraEvent() async throws {
+        let end = AgentStreamEvent.end(.init(text: "answer"))
+        for extra in [end, .chunk("late"), .start(.init(turn: 1, candidate: "cloud", model: "anthropic:test"))] {
+            try await withStatus { status, url in
+                var forwarded = 0
+                do {
+                    try await consumeDemoTurn(stream([end, extra]), status: status) { _ in forwarded += 1 }
+                    XCTFail("post-end event was accepted")
+                } catch {}
+                XCTAssertEqual(forwarded, 0)
+                try assertSnapshot(url, stage: "failed", failure: "invalid_response", request: false, http: nil, streamed: false)
+            }
+        }
+    }
+
+    func testErrorAfterEndCannotPublishCompletedStatus() async throws {
+        try await withStatus { status, url in
+            var endCallbacks = 0
+            do {
+                try await consumeDemoTurn(stream([.end(.init(text: "answer"))], failure: .generationFailed(canary)), status: status) { event in
+                    if case .end = event { endCallbacks += 1 }
+                }
+                XCTFail("post-end error was accepted")
+            } catch {}
+            XCTAssertEqual(endCallbacks, 0)
+            try assertSnapshot(url, stage: "failed", failure: "generation", request: false, http: nil, streamed: false)
+        }
+    }
+
+    func testTaskCancellationAtEndAndBeforeIterationAreClassifiedCancelled() async throws {
+        for cancelAtEnd in [false, true] {
+            try await withStatus { status, url in
+                let operation = Task { @MainActor in
+                    if !cancelAtEnd { withUnsafeCurrentTask { $0?.cancel() } }
+                    try await consumeDemoTurn(stream([.end(.init(text: "answer"))]), status: status) { _ in
+                        if cancelAtEnd { withUnsafeCurrentTask { $0?.cancel() } }
+                    }
+                }
+                switch await operation.result {
+                case .success: XCTFail("cancelled consumer succeeded")
+                case .failure(let error): XCTAssertTrue(error is CancellationError)
+                }
+                try assertSnapshot(url, stage: "failed", failure: "cancelled", request: false, http: nil, streamed: false)
+            }
+        }
+    }
+
+    func testTaskCancellationWhileAwaitingMoreFramesCannotLookLikeCleanEOF() async throws {
+        try await withStatus { status, url in
+            let (events, continuation) = AsyncThrowingStream<AgentStreamEvent, Error>.makeStream()
+            continuation.yield(.chunk("partial"))
+            let operation = Task { @MainActor in
+                try await consumeDemoTurn(events, status: status) { _ in
+                    withUnsafeCurrentTask { $0?.cancel() }
+                }
+            }
+            switch await operation.result {
+            case .success: XCTFail("cancelled consumer succeeded")
+            case .failure(let error): XCTAssertTrue(error is CancellationError)
+            }
+            continuation.finish()
+            try assertSnapshot(url, stage: "failed", failure: "cancelled", request: false, http: nil, streamed: true)
+        }
+    }
+
+    func testCallbackFailureBeforeCleanClosureIsTerminalAndBounded() async throws {
+        try await withStatus { status, url in
+            do {
+                try await consumeDemoTurn(stream([.end(.init(text: "answer"))]), status: status) { _ in
+                    throw NSError(domain: canary, code: 7, userInfo: [NSLocalizedDescriptionKey: canary])
+                }
+                XCTFail("callback failure was swallowed")
+            } catch {}
+            try assertSnapshot(url, stage: "failed", failure: "unknown", request: false, http: nil, streamed: false)
+        }
+    }
+
+    func testObservedNonStreamingTransportRecordsRequestAndResponse() async throws {
+        try await withStatus { status, url in
+            let observer = ObservedCloudSmokeTransport(status: status, transport: FixtureTransport(statusCode: 202, lines: [], failure: nil))
+            let (_, code) = try await observer.send(URLRequest(url: URL(string: "https://fixture.invalid")!))
+            XCTAssertEqual(code, 202)
+            try assertSnapshot(url, stage: "response_received", failure: nil, request: true, http: 202, streamed: false)
+        }
+    }
+
+    private func assertFailure(_ events: AsyncThrowingStream<AgentStreamEvent, Error>, status: CloudSmokeStatus) async {
+        do {
+            try await consumeDemoTurn(events, status: status) { _ in }
+            XCTFail("expected failed stream")
+        } catch {}
+    }
+
+    private func stream(_ frames: [AgentStreamEvent], failure: AgentRuntimeError? = nil) -> AsyncThrowingStream<AgentStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            for frame in frames { continuation.yield(frame) }
+            continuation.finish(throwing: failure)
+        }
+    }
+
+    private func makeSession(status: CloudSmokeStatus, statusCode: Int = 200, lines: [String], failure: (any Error)? = nil) throws -> any AgentSession {
+        let candidate = AgentModelCandidate(name: "cloud", model: "anthropic:test-model")
+        let config = AgentConfig(id: "smoke_test", name: "Smoke test", version: "v1", schemaVersion: "2", systemPrompt: "test", runtime: .init(streaming: true), model: .init(strategy: "single", candidates: [candidate]))
+        let manifest = try AgentManifestLoader.load(JSONEncoder().encode(config))
+        let transport = ObservedCloudSmokeTransport(status: status, transport: FixtureTransport(statusCode: statusCode, lines: lines, failure: failure))
+        return try ClaudeMessagesAdapter(transport: transport).makeSession(manifest: manifest, candidate: candidate, configuration: .init(providerKeys: .init(["anthropic": canary])))
+    }
+
+    private func read(_ url: URL) throws -> [String: Any] {
+        try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+    }
+
+    private func assertSnapshot(_ url: URL, stage: String, failure: String?, request: Bool, http: Int?, streamed: Bool) throws {
+        let data = try Data(contentsOf: url)
+        let snapshot = try read(url)
+        XCTAssertEqual(snapshot["stage"] as? String, stage)
+        XCTAssertEqual(snapshot["failure"] as? String, failure)
+        XCTAssertEqual(snapshot["requestStarted"] as? Bool, request)
+        XCTAssertEqual(snapshot["httpStatus"] as? Int, http)
+        XCTAssertEqual(snapshot["streamed"] as? Bool, streamed)
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains(canary))
+        XCTAssertLessThanOrEqual(data.count, 512)
+    }
+
+    private func withStatus(_ body: (CloudSmokeStatus, URL) async throws -> Void) async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("status.json")
+        try await body(CloudSmokeStatus(path: url.path), url)
+    }
+
+    private static let partialLines = [
+        "event: message_start", #"data: {"type":"message_start","message":{"id":"test"}}"#, "",
+        "event: content_block_start", #"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#, "",
+        "event: content_block_delta", #"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}"#, ""
+    ]
+    private static let completeLines = partialLines + [
+        "event: content_block_stop", #"data: {"type":"content_block_stop","index":0}"#, "",
+        "event: message_delta", #"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#, "",
+        "event: message_stop", #"data: {"type":"message_stop"}"#, ""
+    ]
+}
+
+private struct FixtureTransport: HTTPStreamTransport {
+    let statusCode: Int
+    let lines: [String]
+    let failure: (any Error)?
+    func send(_ request: URLRequest) async throws -> (Data, Int) { (Data(), statusCode) }
+    func streamLines(_ request: URLRequest) async throws -> (AsyncThrowingStream<String, Error>, Int) {
+        (AsyncThrowingStream { continuation in
+            for line in lines { continuation.yield(line) }
+            continuation.finish(throwing: failure)
+        }, statusCode)
+    }
+}
+'''
+
+
 def run(log_path: Path, timeout: int) -> int:
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="cloud-smoke-status-", dir="/tmp") as directory:
@@ -273,8 +526,10 @@ def run(log_path: Path, timeout: int) -> int:
         tests = harness / "Tests/CloudSmokeStatusHarnessTests"
         source.mkdir(parents=True)
         tests.mkdir(parents=True)
-        shutil.copyfile(ROOT / "Sources/agent-runtime-demo/CloudSmokeStatus.swift", source / "CloudSmokeStatus.swift")
+        for filename in ["CloudSmokeStatus.swift", "ConsumeDemoTurn.swift"]:
+            shutil.copyfile(ROOT / "Sources/agent-runtime-demo" / filename, source / filename)
         (tests / "CloudSmokeStatusTests.swift").write_text(TESTS)
+        (tests / "DemoTurnTests.swift").write_text(TURN_TESTS)
         (harness / "Package.swift").write_text("""// swift-tools-version: 6.0
 import PackageDescription
 let package = Package(

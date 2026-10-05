@@ -15,6 +15,26 @@ final class CloudSmokeStatus: @unchecked Sendable {
         case streaming
         case completed
         case failed
+
+        fileprivate var isTerminal: Bool {
+            switch self {
+            case .ownerDeclined, .completed, .failed: true
+            default: false
+            }
+        }
+
+        fileprivate var progress: Int {
+            switch self {
+            case .started: 0
+            case .credentialEntryRequested: 1
+            case .awaitingSend: 2
+            case .turnStarted: 3
+            case .requestStarted: 4
+            case .responseReceived: 5
+            case .streaming: 6
+            case .ownerDeclined, .completed, .failed: 7
+            }
+        }
     }
 
     enum Failure: String, Encodable {
@@ -24,6 +44,7 @@ final class CloudSmokeStatus: @unchecked Sendable {
         case guardrail, cancelled, turnLimit = "turn_limit", tool, unknown
 
         static func classify(_ error: Error) -> Self {
+            if error is CancellationError { return .cancelled }
             guard let error = error as? AgentRuntimeError else { return .unknown }
             switch error {
             case .modelUnavailable(.missingProviderKey): return .authentication
@@ -66,7 +87,10 @@ final class CloudSmokeStatus: @unchecked Sendable {
     func record(_ stage: Stage, failure: Failure? = nil, httpStatus: Int? = nil) {
         lock.lock()
         defer { lock.unlock() }
-        snapshot.stage = stage
+        // First terminal outcome wins. Late transport callbacks must neither
+        // downgrade it nor erase the evidence that led to that outcome.
+        guard !snapshot.stage.isTerminal else { return }
+        if stage.progress >= snapshot.stage.progress { snapshot.stage = stage }
         snapshot.updatedAt = Date().timeIntervalSince1970
         if stage == .requestStarted { snapshot.requestStarted = true }
         if stage == .streaming { snapshot.streamed = true }
@@ -83,7 +107,12 @@ final class CloudSmokeStatus: @unchecked Sendable {
 /// SingleRequestCloudTransport enforces its existing one-request limit first.
 struct ObservedCloudSmokeTransport: HTTPStreamTransport {
     let status: CloudSmokeStatus
-    private let transport = URLSessionStreamTransport()
+    private let transport: any HTTPStreamTransport
+
+    init(status: CloudSmokeStatus, transport: any HTTPStreamTransport = URLSessionStreamTransport()) {
+        self.status = status
+        self.transport = transport
+    }
 
     func send(_ request: URLRequest) async throws -> (Data, Int) {
         status.record(.requestStarted)
