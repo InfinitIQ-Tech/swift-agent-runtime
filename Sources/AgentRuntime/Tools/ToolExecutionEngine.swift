@@ -11,7 +11,9 @@ import FoundationNetworking
 /// host-registered handler executes it; otherwise the call fails typed.
 public actor ToolExecutionEngine {
     private let toolbox: AgentToolbox
-    private let handlers: [String: AgentToolHandler]
+    // Preserve the exact spelling of each key stored in the public handler
+    // dictionary; Swift String equality folds canonically equivalent names.
+    private let handlers: [Data: AgentToolHandler]
     private let confirm: (@Sendable (AgentToolCall) async -> Bool)?
     private let webhook: WebhookToolExecutor
     private var turnID = UUID()
@@ -55,7 +57,9 @@ public actor ToolExecutionEngine {
         transport: WebhookTransport = URLSessionWebhookTransport()
     ) {
         self.toolbox = toolbox
-        self.handlers = configuration.toolHandlers
+        self.handlers = Dictionary(uniqueKeysWithValues: configuration.toolHandlers.map {
+            (Data($0.key.utf8), $0.value)
+        })
         self.confirm = configuration.confirmToolExecution
         self.webhook = WebhookToolExecutor(transport: transport)
     }
@@ -203,7 +207,9 @@ public actor ToolExecutionEngine {
             return failure(call, "Tool is not in the allow-list for this agent.")
         }
 
-        if toolbox.policy?.requireUserConfirmation?.contains(call.toolId) == true {
+        if toolbox.policy?.requireUserConfirmation?.contains(where: {
+            $0.utf8.elementsEqual(call.toolId.utf8)
+        }) == true {
             guard let confirm else {
                 return failure(call, "User confirmation was required and not granted.")
             }
@@ -225,7 +231,7 @@ public actor ToolExecutionEngine {
             let result = await webhook.execute(endpoint: endpoint, call: call, timeoutMs: remainingBudgetMs)
             output = result.output
             success = result.success
-        } else if let handler = handlers[call.toolId] {
+        } else if let handler = handlers[Data(call.toolId.utf8)] {
             do {
                 output = try await handler(call.args)
                 success = true

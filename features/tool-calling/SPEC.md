@@ -10,6 +10,7 @@ The portable contract is owned by `../AgentFactory/features/swift-agent-runtime/
 - Each name resolves to its last definition, including when `allowed` is absent. Duplicate allowed names expose one definition. Complete definition metadata is retained.
 - Resolved definitions use the sidecar's sorted Unicode scalar name order, independent of manifest list order. Names use exact Unicode identity without canonical-equivalence merging. This intentionally corrects the earlier Swift-only manifest-order behavior to match `LangchainRuntimeService/app/application/tools_manager.py`.
 - Normalization does not execute endpoints. The Swift runtime owns webhook dispatch; the sidecar's selected endpoint is metadata, not evidence of sidecar webhook execution.
+- Native handler dispatch and confirmation-policy names use the same exact Unicode identity. A differently spelled stored handler key never aliases an allowed name. The existing Swift dictionary configuration can represent only one of two canonically equivalent keys; an unregistered exact spelling fails as missing a handler rather than invoking another tool.
 
 ## Execution and lifecycle
 
