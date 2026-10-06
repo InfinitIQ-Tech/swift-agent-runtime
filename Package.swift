@@ -22,7 +22,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "agent-runtime-demo",
-            dependencies: ["AgentRuntime"]
+            dependencies: ["AgentRuntime", "RuntimeDemoSupport"]
         ),
         .target(name: "RuntimeDemoSupport", dependencies: ["AgentRuntime"]),
         .testTarget(name: "RuntimeDemoSupportTests", dependencies: ["RuntimeDemoSupport"]),

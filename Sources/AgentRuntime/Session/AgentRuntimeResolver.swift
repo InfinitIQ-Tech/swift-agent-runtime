@@ -19,6 +19,9 @@ public enum AgentRuntimeResolver {
     ///   manifest order. Unrecognized strategies are pass-through per the
     ///   public schema; ordered fallback is this runtime's execution-time
     ///   interpretation.
+    /// - `routing_policy.prefer_on_device: true`: stably prioritizes the
+    ///   supported on-device candidate under fallback. Other metadata is
+    ///   preserved by the manifest and does not alter this selection.
     public static func makeSession(
         manifest: AgentManifest,
         configuration: AgentSessionConfiguration = AgentSessionConfiguration(),
@@ -69,6 +72,14 @@ public enum AgentRuntimeResolver {
         if manifest.config.model.strategy == "single" {
             return Array(manifest.config.model.candidates.prefix(1))
         }
-        return manifest.config.model.candidates
+        let candidates = manifest.config.model.candidates
+        guard manifest.config.model.routingPolicy?["prefer_on_device"] == .bool(true) else {
+            return candidates
+        }
+        // Stable partition: honor the portable story manifest's routing hint
+        // without changing the relative priority of cloud candidates. A single
+        // strategy above remains an explicit selection, regardless of hints.
+        return candidates.filter { $0.model == "apple:foundation-models" }
+            + candidates.filter { $0.model != "apple:foundation-models" }
     }
 }

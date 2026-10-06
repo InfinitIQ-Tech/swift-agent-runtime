@@ -131,7 +131,7 @@ final class StructuredOutputValidationTests: XCTestCase {
             XCTFail("expected validation failure")
         } catch let error as AgentRuntimeError {
             guard case .structuredOutputInvalid(let reason) = error else { return XCTFail("unexpected \(error)") }
-            XCTAssertTrue(reason.contains("$.choices[0]"))
+            XCTAssertEqual(reason, "Provider output does not match the declared schema")
         }
     }
 

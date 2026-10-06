@@ -53,3 +53,7 @@ The first executed Mac suite exposed an iOS-only test assertion: AppKit static t
 Independent read-only review examined lifecycle/cancellation, credentials, fail-closed tool confirmation, Debug-only simulation, schema drift, Xcode linkage, scripts, and CI configuration. The later assertion correction was independently reviewed with no remaining actionable findings. `git diff --check`, shell syntax checks, and executable-mode checks passed. The unsigned device build has a nonblocking orientation warning; device installation/signing and physical-device execution were not tested.
 
 Local verification is complete. Hosted AF-81 CI remains pending publication; the README links its workflow badge, but no green hosted result is claimed for the unpublished change. No push, PR, merge, release, Jira post, physical-device execution, or live-model/provider generation was performed. Only local commits were prepared. The four original development checkouts match their saved HEAD, status, tracked-diff hashes, and recorded untracked-file hashes.
+
+## 2026-10-04 — AF-80 routing alignment
+
+- Updated `SPEC.md` to describe model strategy and routing policy through the resolver, including the on-device preference. App source and its lifecycle remain unchanged.

@@ -1,8 +1,9 @@
 import Foundation
 
 // Wire types for the Anthropic Messages API (anthropic-version 2023-06-01).
-// Raw HTTP is the sanctioned integration path for Swift; there is no official
-// Swift SDK. Shapes follow the current Messages API documentation.
+// Raw HTTP preserves the iOS 17/macOS 15 floors. Anthropic's Foundation Models
+// integration requires OS 27 and is not a general-purpose Messages Swift client.
+// Shapes follow the current Messages API documentation.
 
 enum AnthropicWire {
     static let apiVersion = "2023-06-01"
@@ -58,6 +59,7 @@ enum AnthropicWire {
 
     enum ContentBlock: Codable {
         case text(String)
+        case opaque(JSONValue)
         case toolUse(id: String, name: String, input: [String: JSONValue])
         case toolResult(toolUseId: String, content: String, isError: Bool)
 
@@ -82,7 +84,7 @@ enum AnthropicWire {
                 self = .toolUse(
                     id: try container.decode(String.self, forKey: .id),
                     name: try container.decode(String.self, forKey: .name),
-                    input: try container.decodeIfPresent([String: JSONValue].self, forKey: .input) ?? [:]
+                    input: try container.decode([String: JSONValue].self, forKey: .input)
                 )
             case "tool_result":
                 self = .toolResult(
@@ -91,15 +93,16 @@ enum AnthropicWire {
                     isError: try container.decodeIfPresent(Bool.self, forKey: .isError) ?? false
                 )
             default:
-                // Unknown block types (thinking, server tools, ...) are
-                // preserved as empty text so decoding a response never fails.
-                self = .text("")
+                // Preserve unknown blocks, including thinking signatures, in replay.
+                self = .opaque(try JSONValue(from: decoder))
             }
         }
 
         func encode(to encoder: any Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             switch self {
+            case .opaque(let value):
+                try value.encode(to: encoder)
             case .text(let text):
                 try container.encode("text", forKey: .type)
                 try container.encode(text, forKey: .text)

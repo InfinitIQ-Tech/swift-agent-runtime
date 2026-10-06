@@ -1,0 +1,52 @@
+# Cloud adapter
+
+> Source of truth for AF-80 cloud execution, transport, and candidate routing in this package. The portable contract remains owned by `../AgentFactory/features/swift-agent-runtime/SPEC.md` and the pinned public schema.
+
+## Scope and data flow
+
+The existing `ClaudeMessagesAdapter` implements `AgentRuntimeAdapter` and creates an `AgentSession`. It uses the Anthropic Messages API. AF-80 strengthens that implementation; it does not add an OpenAI adapter or an Assistants API dependency. This module supersedes GPTBridge for portable manifest execution. GPTBridge remains a separate client; importing its provider-specific API would not replace the manifest, tool, or session contracts already owned here.
+
+`AgentManifest` supplies instructions, model candidates, routing metadata, tools, output schema, and turn limits. `AgentSessionConfiguration` supplies only in-memory provider credentials and host tool handlers. `AgentRuntimeResolver` chooses an available candidate once per session. `ClaudeMessagesSession` builds provider requests and executes tool rounds through `ToolExecutionEngine`. There are no AgentFactory endpoints, DTO, database, or persisted credential changes.
+
+## Routing
+
+- `single` considers only the first manifest candidate; routing hints cannot override it.
+- Ordered fallback retains candidate order. Under fallback, `routing_policy.prefer_on_device: true` stably moves the supported `apple:foundation-models` candidate before cloud candidates. False or absent keeps manifest order. Availability and construction use identical ordering.
+- Other routing members are preserved as pass-through metadata per the public schema. This package does not implement weighted routing or per-turn reselection. Existing unrecognized strategies retain the documented ordered-fallback interpretation.
+- Claude accepts only a nonempty `anthropic:<model>` identifier and a nonblank runtime-supplied key. Direct adapter construction applies the same eligibility checks.
+- Provider failures after selection do not silently switch providers or replay paid requests.
+
+## Cloud turns and errors
+
+- One admitted turn runs at a time. Overlap fails with `generationFailed` before consuming budget. Every admitted attempt consumes one turn. Cancellation holds the active slot until cleanup finishes and prevents late successful output.
+- Incomplete or malformed known SSE events, unfinished tool arguments, and missing `message_stop` fail with `invalidProviderResponse`; they cannot publish an `end` frame. Unknown event types remain forward compatible.
+- The production URLSession transport bounds SSE lines and accumulated event payloads to 1 MiB. Non-200 response lines are bounded to 16 KiB, matching the existing bounded error-body collection. Exceeding a transport bound cancels the underlying request and reports a fixed diagnostic; a known HTTP error status remains available without exposing its body. Host-supplied `HTTPStreamTransport` implementations own equivalent input bounds.
+- The message-delta phase begins after content blocks close and cannot resume content. Cumulative usage updates may precede or follow the one nonempty terminal stop reason; a second terminal reason is invalid, even if identical. A terminal reason and `message_stop` are both required for success.
+- Only complete tool argument objects may execute. Assistant tool blocks retain provider order when replayed. Tool-round text appears once in the wire transcript.
+- Successful assistant history is committed only after the terminal frame is accepted. Interrupted cloud wire state is rolled back before a later send; externally performed tool effects are not undone. Hosts discard interrupted sessions as documented by the shared demo lifecycle.
+- HTTP authentication, context exhaustion, refusals, cancellation, malformed responses, and generation failures use the existing typed errors. Diagnostics use bounded runtime-authored descriptions and status/code values, never raw provider bodies, transport error descriptions, or request headers.
+- `model_context_window_exceeded` maps to `contextWindowExceeded`; `max_tokens`, `pause_turn`, and unknown stop reasons fail without an `end` result or automatic provider continuation. Only `end_turn` and `stop_sequence` finish ordinary responses; `tool_use` continues the bounded client-tool loop.
+- AF-83 structured output remains non-streaming with recursive validation and whole-payload delivery. Prewarm remains a network-free no-op.
+
+## Credential boundary
+
+Credentials are separate from manifest encoding and transcripts. Provider key descriptions, reflection and debug output redact values, including recursive reflection of a constructed cloud session. The production transport uses ephemeral storage, no URL cache, cookies, or credential store, and rejects redirects so authenticated requests cannot forward the key. Injected host transports/sessions are responsible for the same storage policy; `URLSessionStreamTransport` also blocks redirects for injected sessions. No credential lookup or acquisition is performed by the runtime.
+
+The CLI accepts `--adapter automatic|cloud|on-device`, defaulting to automatic. It injects that adapter set into the resolver without rewriting the manifest or send/consume loop. `--prompt-provider-key` uses `readSecureProviderKey()` in `Sources/agent-runtime-demo/SecureKeyReader.swift`: Darwin `readpassphrase` with `RPP_REQUIRE_TTY`, echo disabled, a 1,024-byte temporary buffer, UTF-8 validation, and buffer clearing on exit. Input is limited to 1,022 UTF-8 bytes; a full/oversized result is rejected instead of silently accepting a truncated key. The key stays in memory. Existing host-provided `ANTHROPIC_API_KEY` remains supported during execution; `--dry-run` reads no provider credential and never prompts. The CLI flushes text chunks for incremental display and prints whole structured payloads after validated stream completion.
+
+`--cloud-smoke-test` selects Claude with a 256 output-token limit, sends one fixed short story prompt through the same session consumer, and exits. `SingleRequestCloudTransport` in demo support admits at most one transport call across streaming/non-streaming methods, consuming the budget before suspension, even if the request fails. A tool request cannot lead to a second billed round; that outcome does not satisfy live text acceptance. With explicit owner permission, the coding agent may prepare the executable, open the protected key prompt, and monitor credential-free results. The owner alone enters an existing key and types `SEND` followed by Return to initiate the request; any other confirmation exits without sending. The terminal prompt contains a simple `SEND` action and no budget, price, or cost text; request and token caps remain enforced in code. The agent must not acquire, enter, capture, or transmit the key, or initiate the credential-bearing request. No manifest bytes or public runtime protocol change is involved.
+
+`--smoke-status-file <path>` is opt-in and requires `--cloud-smoke-test` without `--dry-run`. `Sources/agent-runtime-demo/CloudSmokeStatus.swift` writes an atomic latest snapshot with only `schemaVersion`, `processID`, `updatedAt`, fixed `stage`/`failure` enums, optional numeric `httpStatus`, and sticky `requestStarted`/`streamed` booleans. It accepts no input text, credentials, request/header/provider bodies, generated output, or raw errors for serialization. Fresh output paths and matching process/timestamp identity are required when interpreting evidence; a stale file or failed update cannot establish current state. `credential_entry_requested` is recorded before invoking the reader and does not prove a secure prompt is ready. `awaiting_send` follows a successful reader return. `request_started` is a local transport attempt; `completed` plus `streamed: true` records exactly one end, clean stream closure and a nonempty text chunk only for the matching run. A status file alone does not establish owner live acceptance.
+
+## Verification and acceptance
+
+CLI completion display and `completed` status require exactly one `end` followed by clean stream closure, with no later event, error or cancellation. EOF without `end` is failure. The first terminal status is final; late callbacks cannot replace it or regress its milestones. Smoke failures, including exhaustion of the one-request budget, exit nonzero. Empty key input or EOF fails credential entry. Catchable SIGINT, SIGTERM and SIGHUP record cancellation and restore terminal echo, including interruption during protected entry. SIGKILL, a crash or power loss cannot guarantee a final write or cleanup: a remaining nonterminal snapshot is an unknown outcome, never proof that the process is alive. These safeguards add no owner prompt or budget gate.
+
+Run `swift test`, `swift build`, the pinned schema gate and relevant platform builds from the repository root. Focused tests cover overlap/cancellation, incomplete and malformed streams, tool replay, HTTP/SSE/transport diagnostic redaction, provider eligibility, routing order, and the original checked-in manifest through the same session call site with different adapter sets. Production transport checks use local deterministic URL loading; they are not live provider evidence.
+
+1. Given the checked-in story manifest and an owner-supplied in-memory Claude credential, when its cloud candidate is selected and a turn is sent, then a live stream emits start, text chunks, and a successful end. This requires separately recorded live evidence.
+2. Given that same manifest and consumer, when the available adapter set changes, then neither manifest bytes nor send/consume code changes.
+3. Given provider responses or failures that echo test sentinel values, when errors are surfaced, then diagnostics contain no credential sentinel and no provider body.
+4. Given cancellation, an overlapping send, or a truncated stream, when generation finishes, then no false success is committed.
+
+Always preserve iOS 17/macOS 15 floors, AF-78 lifecycle behavior, AF-81 demo semantics, AF-83 output validation, and schema drift checks. Ask before changing the public protocol/event/schema surface. Never hand-edit vendored manifests/schema, persist credentials, or claim mocked responses are live acceptance. Live verification requires owner-controlled secure credential entry and spend authorization; keys must not be sent in chat or acquired by the agent.

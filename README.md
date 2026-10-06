@@ -20,9 +20,9 @@ import AgentRuntime
 let manifest = try AgentManifestLoader.load(contentsOf: manifestURL)
 
 var configuration = AgentSessionConfiguration()
-configuration.providerKeys[ProviderKeys.anthropicProvider] = keyFromKeychain // cloud only; never stored
+configuration.providerKeys[ProviderKeys.anthropicProvider] = keyFromSecureInput // cloud only; in memory
 
-// Picks the first available candidate from manifest.model.candidates:
+// Applies model.strategy and routing_policy to manifest.model.candidates:
 // "apple:foundation-models" on-device, "anthropic:<model>" in the cloud.
 let session = try AgentRuntimeResolver.makeSession(manifest: manifest, configuration: configuration)
 
@@ -45,7 +45,8 @@ for try await event in await session.send("Tell me a story") {
 | `runtime.streaming` | `start` → text-delta `chunk` frames → `end` when on; `start` → `end` when off (tool events may occur in either mode) |
 | `runtime.max_turns` | Typed `maxTurnsExceeded` once the session limit is reached |
 | `runtime.max_concurrent_tools` | Concurrent tool-execution width |
-| `model.strategy` / `model.candidates` | `single` uses the first candidate; `fallback` walks candidates in order until an adapter is available |
+| `model.strategy` / `model.candidates` | `single` uses only the first candidate; `fallback` walks candidates until an adapter is available; unrecognized strategies retain ordered fallback |
+| `model.routing_policy.prefer_on_device` | Under fallback, `true` stably prioritizes exact `apple:foundation-models`; false/absent retains manifest order. Other routing metadata is preserved without changing selection |
 | `tools.allowed` / `tools.definitions` | Sidecar-parity allow-list normalization; only allowed tools are ever registered with a model. No tools configured → zero tools registered |
 | `tools.definitions[].endpoint` | Webhook execution over `URLSession` (method, headers) |
 | `tools.tool_policy` | `max_tools_per_turn`, `max_total_runtime_ms`, `require_user_confirmation` via a host confirmation hook |
@@ -85,7 +86,44 @@ Foundation Models operations; they do not establish live provider/device
 quality or latency.
 
 Provider keys are runtime-supplied configuration (`ProviderKeys`), never part
-of the manifest, never persisted, and redacted from every description.
+of the manifest, never persisted by the runtime, and redacted from descriptions,
+debug output, and reflection. Cloud diagnostics use runtime-authored messages
+and status/code values, never raw provider bodies or transport descriptions.
+
+## Cloud execution
+
+AF-80 extends the existing `ClaudeMessagesAdapter` using the
+[Anthropic Messages API](https://platform.claude.com/docs/en/api/messages/create).
+It supersedes GPTBridge for portable AgentConfig execution: the runtime already
+owns the manifest, tools, structured output, and `AgentSession` contract.
+GPTBridge's static `appLaunch`, Chat Completions methods, and deprecated
+Assistants helpers remain in that separate client. No GPTBridge dependency,
+OpenAI adapter, or Assistants API is introduced here.
+
+Both availability and session creation use the same candidate ordering. A
+nonempty `anthropic:<model>` identifier and a nonblank runtime key make a
+candidate locally available; this check makes no request and does not validate
+account access. Selection happens once per session. Provider errors do not
+silently select another model or replay paid requests. Hosts can inject an
+adapter set into `AgentRuntimeResolver` while keeping the manifest and
+`AgentSession.send` consumer unchanged.
+
+Cloud sessions admit one active turn. Overlap fails before consuming a turn;
+each admitted attempt consumes a turn, including failure or cancellation.
+Cancellation keeps the active slot until cleanup finishes and prevents a late
+successful `end`. A missing terminal provider event, malformed known stream
+event, or incomplete tool arguments fails with `invalidProviderResponse`.
+Unknown event types remain forward compatible. Interrupted provider history
+is rolled back; external tool effects are not undone. Hosts should discard an
+interrupted session, as the SwiftUI demo does.
+
+The default cloud transport uses an ephemeral URL session with cache, cookies,
+and credential storage disabled and rejects redirects. A host that injects a
+custom transport/session owns the equivalent safeguards. The runtime acquires
+no credentials. See [cloud verification](docs/cloud-verification.md) for the
+API references, GPTBridge decision, deterministic evidence scope, and the
+owner-run live-streaming procedure. Automated tests do not establish live
+provider acceptance.
 
 ## Platforms
 
@@ -174,9 +212,50 @@ The original CLI remains available:
 # validate a manifest (no network, no backend)
 swift run agent-runtime-demo --manifest Manifests/story-companion.agentconfig.json --dry-run
 
-# chat on-device, or via cloud with ANTHROPIC_API_KEY in the process environment
+# chat using manifest routing and the available adapters
 swift run agent-runtime-demo --manifest Manifests/story-companion.agentconfig.json
+
+# general cloud chat; hidden terminal key entry
+swift run agent-runtime-demo --manifest Manifests/story-companion.agentconfig.json --adapter cloud --prompt-provider-key
+
+# bounded live check within the owner's authorization
+.build/debug/agent-runtime-demo --manifest Manifests/story-companion.agentconfig.json --cloud-smoke-test
 ```
+
+`--adapter automatic` is the default; `cloud` and `on-device` restrict the
+available adapter set without editing the manifest or changing the send loop.
+Supplying a key alone does not override an available on-device candidate.
+`--prompt-provider-key` uses `readpassphrase` with echo disabled and a required
+controlling terminal. It accepts up to 1,022 UTF-8 bytes, rejects oversized
+input, and clears its temporary buffer. The CLI also accepts an owner-provided `ANTHROPIC_API_KEY` in its
+process environment when the prompt flag is absent; no key belongs in a shell
+command, `.env` file, launch configuration, or chat. `--dry-run` neither reads
+provider keys nor prompts for them and makes no provider request.
+
+`--cloud-smoke-test` is the bounded live acceptance path. It verifies the
+original manifest's SHA-256, forces cloud, sets `max_tokens: 256` and
+`service_tier: "standard_only"`, and permits at most one provider request,
+including tool continuations. It always uses hidden owner key entry, ignores
+environment keys, and requires the owner to type `SEND` and press Enter before
+sending its fixed short prompt. With explicit owner permission, the coding
+agent may prepare/open the protected prompt and monitor credential-free
+results; the owner alone enters the key and initiates the request. It exits
+after that turn; `--adapter on-device` conflicts
+with this mode. A tool continuation is denied and does not count as successful
+live acceptance. The documented standard-rate ceiling is **$0.20128 before
+tax** at published standard prices; tax and custom account terms are excluded.
+The terminal flow has no cost text or separate budget gate. Each invocation
+must stay within the owner's authorization. Pricing assumptions, secure entry,
+and evidence requirements are in [cloud verification](docs/cloud-verification.md).
+
+Optional `--smoke-status-file <path>` requires `--cloud-smoke-test` without
+`--dry-run`. It writes only a closed JSON schema of PID, timestamp, fixed
+stage/failure values, numeric HTTP status, and request/stream flags; it never
+writes credential input, request bodies, generated text, or raw errors. Use a
+fresh path and verify the expected process and timestamps before interpreting
+it. `credential_entry_requested` means the reader is about to be called; it
+does **not** prove the protected prompt is ready. The verification guide
+defines the remaining stage and completion evidence boundaries.
 
 Maintainers can regenerate the checked-in Xcode project from `Demo/project.yml`
 with XcodeGen (`xcodegen generate --spec Demo/project.yml`; generated with 2.45.4).

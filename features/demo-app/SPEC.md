@@ -10,7 +10,7 @@ The app bundles `Manifests/story-companion.agentconfig.json` directly. Only the 
 
 - A checked-in Xcode project links the local AgentRuntime package and shares SwiftUI source between iOS 17 and macOS 15 targets. Foundation Models remains gated at iOS/macOS 26 inside the runtime.
 - App startup loads and validates the bundled manifest. A visible unavailable/error state prevents sending until a session can be opened. Retrying availability or starting a new conversation allows recovery.
-- Normal execution follows manifest candidate order using AgentRuntimeResolver. An optional Anthropic key is entered in a secure field and remains in memory; it is never persisted or shown in errors/logs. No backend endpoint is configured or called.
+- Normal execution follows manifest model strategy and routing policy using AgentRuntimeResolver. An optional Anthropic key is entered in a secure field and remains in memory; it is never persisted or shown in errors/logs. No backend endpoint is configured or called.
 - The chat shows user messages, streamed assistant text, final responses (including end-only structured turns), tool events, remaining turns, and typed errors. Empty input and concurrent sends are rejected.
 - Stop cancels the active operation; reset, disappearance/backgrounding, and reconnect invalidate stale callbacks. Interrupted sessions are discarded before reuse to avoid sharing an adapter whose previous operation is still completing. Repeated send/stop/reset must not allow an old task to change a new conversation.
 - The manifest's `save_story` native tool saves only to a visible in-memory demo library. No filesystem persistence is implied. Confirmation-required tools fail closed unless the host explicitly handles confirmation.
