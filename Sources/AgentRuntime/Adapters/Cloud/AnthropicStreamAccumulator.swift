@@ -9,6 +9,7 @@ struct AnthropicStreamAccumulator {
         var closed = false
     }
     private var started = false
+    private var hasMessageDelta = false
     private var blocks: [Int: Block] = [:]
     private(set) var isComplete = false
     private(set) var stopReason: String?
@@ -60,10 +61,15 @@ struct AnthropicStreamAccumulator {
         guard started else { throw invalid }
         if type == "message_delta" {
             guard blocks.values.allSatisfy(\.closed), case .object(let delta)? = payload["delta"] else { throw invalid }
+            // Usage can arrive in multiple message deltas, but content cannot
+            // resume once this phase starts and the terminal reason is singular.
+            hasMessageDelta = true
             if let reason = delta["stop_reason"] {
                 switch reason {
                 case .null: break
-                case .string(let value) where !value.isEmpty: stopReason = value
+                case .string(let value) where !value.isEmpty:
+                    guard stopReason == nil else { throw invalid }
+                    stopReason = value
                 default: throw invalid
                 }
             }
@@ -74,7 +80,7 @@ struct AnthropicStreamAccumulator {
             isComplete = true
             return nil
         }
-        guard stopReason == nil, case .integer(let index)? = payload["index"], index >= 0 else { throw invalid }
+        guard !hasMessageDelta, case .integer(let index)? = payload["index"], index >= 0 else { throw invalid }
         if type == "content_block_start" {
             guard blocks[index] == nil, case .object(let value)? = payload["content_block"],
                   let blockType = value["type"]?.stringValue, !blockType.isEmpty else { throw invalid }

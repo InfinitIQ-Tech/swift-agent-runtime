@@ -37,6 +37,7 @@ final class ClaudeStreamValidationTests: XCTestCase {
             guard case AgentRuntimeError.invalidProviderResponse = error else {
                 return XCTFail("expected invalidProviderResponse, got \(error)", file: file, line: line)
             }
+            XCTAssertFalse(String(reflecting: error).contains(sentinel), file: file, line: line)
         }
         XCTAssertFalse(ended, file: file, line: line)
         let history = await session.transcript()
@@ -67,6 +68,102 @@ final class ClaudeStreamValidationTests: XCTestCase {
             do { _ = try await collectEvents(await session.send("test")); XCTFail("expected invalid input") }
             catch { guard case AgentRuntimeError.invalidProviderResponse = error else { return XCTFail("unexpected error") } }
             XCTAssertEqual(transport.requests.count, 1)
+        }
+    }
+
+    func testDuplicateOrConflictingTerminalReasonsFailWithoutEnd() async throws {
+        let content = Array(StubHTTPTransport.textRound(["partial"]).dropLast(6))
+        for firstReason in ["end_turn", "max_tokens", "tool_use", "stop_sequence"] {
+            let lines = content
+                + event("message_delta", ",\"delta\":{\"stop_reason\":\"\(firstReason)\"}")
+                + event("message_delta", #", "delta":{"stop_reason":"end_turn"}"#)
+                + event("message_stop")
+            try await assertInvalid(lines)
+        }
+    }
+
+    func testUsageDeltasCannotResumeContentBeforeOrAfterTerminalReason() async throws {
+        let content = Array(StubHTTPTransport.textRound(["partial"]).dropLast(6))
+        let resumedContent = event("content_block_start", #", "index":1,"content_block":{"type":"text","text":"late"}"#)
+            + event("content_block_stop", #", "index":1"#)
+        for delta in [#"{}"#, #"{"stop_reason":null}"#, #"{"stop_reason":"end_turn"}"#] {
+            let lines = content
+                + event("message_delta", ",\"delta\":\(delta),\"usage\":{\"output_tokens\":5}")
+                + resumedContent
+                + event("message_delta", #", "delta":{"stop_reason":"end_turn"}"#)
+                + event("message_stop")
+            try await assertInvalid(lines)
+        }
+    }
+
+    func testUsageDeltasWithoutTerminalReasonCannotComplete() async throws {
+        let content = Array(StubHTTPTransport.textRound(["partial"]).dropLast(6))
+        for delta in [#"{}"#, #"{"stop_reason":null}"#] {
+            let usage = event("message_delta", ",\"delta\":\(delta),\"usage\":{\"output_tokens\":5}")
+            try await assertInvalid(content + usage + event("message_stop"))
+            try await assertInvalid(content + usage)
+        }
+    }
+
+    func testMalformedAndUnknownTerminalReasonsCannotComplete() async throws {
+        let content = Array(StubHTTPTransport.textRound(["partial"]).dropLast(6))
+        for reason in [#""""#, "42", "true", "{}", "[]", #"" ""#, "\"\(sentinel)\""] {
+            let lines = content
+                + event("message_delta", ",\"delta\":{\"stop_reason\":\(reason)}")
+                + event("message_stop")
+            try await assertInvalid(lines)
+        }
+    }
+
+    func testMessageDeltaCannotPrecedeMessageStartOrInterruptOpenBlock() async throws {
+        let terminal = event("message_delta", #", "delta":{"stop_reason":"end_turn"}"#)
+        try await assertInvalid(terminal + event("message_start", #", "message":{}"#) + event("message_stop"))
+        let openBlock = Array(StubHTTPTransport.textRound(["partial"]).dropLast(9))
+        for delta in [#"{}"#, #"{"stop_reason":null}"#, #"{"stop_reason":"end_turn"}"#] {
+            let lines = openBlock
+                + event("message_delta", ",\"delta\":\(delta),\"usage\":{\"output_tokens\":5}")
+                + event("content_block_stop", #", "index":0"#)
+                + terminal
+                + event("message_stop")
+            try await assertInvalid(lines)
+        }
+    }
+
+    func testAccumulatorRejectsRepeatedMessageStopAndMessageDeltaAfterStop() throws {
+        var parser = ServerSentEventParser()
+        var accumulator = AnthropicStreamAccumulator()
+        for line in StubHTTPTransport.textRound(["hello"]) {
+            if let event = parser.consume(line: line) { _ = try accumulator.consume(event) }
+        }
+        XCTAssertTrue(accumulator.isComplete)
+        for lines in [event("message_stop"), event("message_delta", #", "delta":{},"usage":{"output_tokens":6}"#)] {
+            for line in lines {
+                if let event = parser.consume(line: line) {
+                    XCTAssertThrowsError(try accumulator.consume(event)) { error in
+                        XCTAssertEqual(error as? AgentRuntimeError, .invalidProviderResponse("Malformed Messages API stream"))
+                    }
+                }
+            }
+        }
+    }
+
+    func testCumulativeUsageDeltasAroundSingleTerminalReasonRemainCompatible() async throws {
+        let content = Array(StubHTTPTransport.textRound(["hello"]).dropLast(6))
+        for reason in ["end_turn", "stop_sequence"] {
+            let lines = content
+                + event("message_delta", #", "delta":{},"usage":{"output_tokens":2}"#)
+                + event("message_delta", #", "delta":{"stop_reason":null},"usage":{"output_tokens":3}"#)
+                + event("message_delta", ",\"delta\":{\"stop_reason\":\"\(reason)\"},\"usage\":{\"output_tokens\":4}")
+                + event("ping")
+                + event("message_delta", #", "delta":{},"usage":{"output_tokens":5}"#)
+                + event("message_delta", #", "delta":{"stop_reason":null},"usage":{"output_tokens":6}"#)
+                + event("message_stop")
+            let session = try session(StubHTTPTransport(steps: [.sse(status: 200, lines: lines)]))
+            let events = try await collectEvents(await session.send("test"))
+            guard case .start? = events.first else { return XCTFail("missing start") }
+            XCTAssertEqual(Array(events.dropFirst()), [.chunk("hello"), .end(.init(text: "hello"))])
+            let history = await session.transcript()
+            XCTAssertEqual(history.filter { $0.role == .assistant }.count, 1)
         }
     }
 

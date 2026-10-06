@@ -70,6 +70,170 @@ final class HTTPStreamTransportTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    func testStreamAcceptsMaximumUTF8LineAcrossChunksAndResetsAfterBlankLine() async throws {
+        // The 1 MiB limit counts UTF-8 bytes, excluding CR/LF delimiters.
+        let line = String(repeating: "é", count: 524_288)
+        let bytes = Data((line + "\r\n\r\nnext\n").utf8)
+        let chunks = stride(from: 0, to: bytes.count, by: 65_535).map {
+            bytes.subdata(in: $0..<min($0 + 65_535, bytes.count))
+        }
+        let fixture = TransportFixture { $0.respond(status: 200, chunks: chunks) }
+        let (transport, session, request) = fixture.transport()
+        defer { session.invalidateAndCancel(); fixture.remove() }
+        let (stream, _) = try await transport.streamLines(request)
+        var lines: [String] = []
+        for try await line in stream { lines.append(line) }
+        XCTAssertEqual(lines, [line, "", "next"])
+    }
+
+    func testErrorResponseAcceptsExactly16KiBAtEOF() async throws {
+        let line = String(repeating: "é", count: 8_192)
+        let fixture = TransportFixture { $0.respond(status: 503, bytes: Data(line.utf8)) }
+        let (transport, session, request) = fixture.transport()
+        defer { session.invalidateAndCancel(); fixture.remove() }
+        let (stream, status) = try await transport.streamLines(request)
+        var lines: [String] = []
+        for try await line in stream { lines.append(line) }
+        XCTAssertEqual(status, 503)
+        XCTAssertEqual(lines, [line])
+    }
+
+    func testOversizedUnterminatedLinesCancelTaskWithoutReturningContent() async throws {
+        // Exercise both limits, across many callbacks and a single oversized
+        // callback. The body stays open: rejection cannot depend on EOF.
+        for (status, limit) in [(200, 1_048_576), (503, 16_384)] {
+            for chunkSize in [4_093, limit + 1] {
+                let sentinel = "synthetic-response-content-must-not-escape"
+                let bytes = Data((sentinel + String(repeating: "x", count: limit + 1 - sentinel.utf8.count)).utf8)
+                let chunks = stride(from: 0, to: bytes.count, by: chunkSize).map {
+                    bytes.subdata(in: $0..<min($0 + chunkSize, bytes.count))
+                }
+                let stopped = expectation(description: "oversized \(status) response cancelled")
+                let fixture = TransportFixture(stopped: stopped) {
+                    $0.respond(status: status, chunks: chunks, finish: false)
+                }
+                let (transport, session, request) = fixture.transport()
+                defer { session.invalidateAndCancel(); fixture.remove() }
+                let (stream, responseStatus) = try await transport.streamLines(request)
+                XCTAssertEqual(responseStatus, status)
+                var lineCount = 0
+                do {
+                    for try await _ in stream { lineCount += 1 }
+                    XCTFail("oversized unterminated line must fail")
+                } catch let error as URLError {
+                    XCTAssertEqual(error.code, .dataLengthExceedsMaximum)
+                    XCTAssertTrue(error.userInfo.isEmpty)
+                    XCTAssertFalse(String(reflecting: error).contains(sentinel))
+                    XCTAssertFalse(error.localizedDescription.contains(sentinel))
+                }
+                XCTAssertEqual(lineCount, 0)
+                await fulfillment(of: [stopped], timeout: 2)
+            }
+        }
+    }
+
+    func testErrorLineLimitCountsUTF8BytesBeforeDecoding() async throws {
+        // Far fewer than 16,384 characters, but one byte over the wire limit.
+        let bytes = Data((String(repeating: "🌍", count: 4_096) + "x").utf8)
+        let stopped = expectation(description: "oversized UTF-8 response cancelled")
+        let fixture = TransportFixture(stopped: stopped) {
+            $0.respond(status: 400, bytes: bytes, finish: false)
+        }
+        let (transport, session, request) = fixture.transport()
+        defer { session.invalidateAndCancel(); fixture.remove() }
+        let (stream, _) = try await transport.streamLines(request)
+        do {
+            for try await _ in stream { XCTFail("oversized line must not be yielded") }
+            XCTFail("UTF-8 wire bytes must be bounded")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .dataLengthExceedsMaximum)
+        }
+        await fulfillment(of: [stopped], timeout: 2)
+    }
+
+    func testEventBudgetRejectsManySmallDataLinesAndCancelsTask() async throws {
+        let line = "data:" + String(repeating: "x", count: 1_019)
+        let chunks = Array(repeating: Data((line + "\n").utf8), count: 1_024) + [Data("data:x\n".utf8)]
+        let stopped = expectation(description: "oversized event cancelled")
+        let fixture = TransportFixture(stopped: stopped) {
+            $0.respond(status: 200, chunks: chunks, finish: false)
+        }
+        let (transport, session, request) = fixture.transport()
+        defer { session.invalidateAndCancel(); fixture.remove() }
+        let (stream, _) = try await transport.streamLines(request)
+        var parser = ServerSentEventParser()
+        var count = 0
+        do {
+            for try await line in stream {
+                count += 1
+                XCTAssertNil(parser.consume(line: line))
+            }
+            XCTFail("an event cannot grow indefinitely via short data lines")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .dataLengthExceedsMaximum)
+        }
+        XCTAssertEqual(count, 1_024)
+        await fulfillment(of: [stopped], timeout: 2)
+    }
+
+    func testEventBudgetAllowsExactBoundaryAndResetsOnBlankLines() async throws {
+        let line = "data:" + String(repeating: "x", count: 524_283)
+        let bytes = Data((line + "\n" + line + "\n\ndata: next\n\n").utf8)
+        let fixture = TransportFixture { $0.respond(status: 200, bytes: bytes) }
+        let (transport, session, request) = fixture.transport()
+        defer { session.invalidateAndCancel(); fixture.remove() }
+        let (stream, _) = try await transport.streamLines(request)
+        var parser = ServerSentEventParser()
+        var events: [ServerSentEvent] = []
+        for try await line in stream {
+            if let event = parser.consume(line: line) { events.append(event) }
+        }
+        XCTAssertEqual(events.count, 2)
+        XCTAssertEqual(events.first?.data.utf8.count, 1_048_567)
+        XCTAssertEqual(events.last, ServerSentEvent(event: nil, data: "next"))
+    }
+
+    func testOversizedBodiesThroughRealAdapterKeepSafeStatusAndNeverCompleteTurn() async throws {
+        let expectedErrors: [(Int, AgentRuntimeError)] = [
+            (200, .generationFailed("Messages API transport failed (code -1103)")),
+            (401, .modelUnavailable(.missingProviderKey(provider: "anthropic"))),
+            (429, .generationFailed("Messages API status 429")),
+            (503, .generationFailed("Messages API status 503"))
+        ]
+        for (status, expected) in expectedErrors {
+            let sentinel = "synthetic-credential-marker"
+            let limit = status == 200 ? 1_048_576 : 16_384
+            let bytes = Data((sentinel + String(repeating: "x", count: limit + 1)).utf8)
+            let stopped = expectation(description: "adapter oversized body cancelled")
+            let fixture = TransportFixture(stopped: stopped) {
+                $0.respond(status: status, bytes: bytes, finish: false)
+            }
+            let (transport, urlSession, request) = fixture.transport()
+            defer { urlSession.invalidateAndCancel(); fixture.remove() }
+            let manifest = try Fixtures.manifest(for: Fixtures.config(streaming: true))
+            let candidate = try XCTUnwrap(manifest.config.model.candidates.first { $0.provider == "anthropic" })
+            let adapter = ClaudeMessagesAdapter(endpoint: request.url, transport: transport)
+            let session = try adapter.makeSession(
+                manifest: manifest, candidate: candidate,
+                configuration: AgentSessionConfiguration(providerKeys: ProviderKeys(["anthropic": sentinel]))
+            )
+            do {
+                for try await event in await session.send("synthetic input") {
+                    if case .chunk = event { XCTFail("oversized first event must not publish content") }
+                    if case .end = event { XCTFail("oversized body must not complete the turn") }
+                }
+                XCTFail("oversized body must fail")
+            } catch let error as AgentRuntimeError {
+                XCTAssertEqual(error, expected)
+                XCTAssertFalse(String(reflecting: error).contains(sentinel))
+                XCTAssertFalse(error.localizedDescription.contains(sentinel))
+            }
+            let transcript = await session.transcript()
+            XCTAssertEqual(transcript.map(\.role), [.user])
+            await fulfillment(of: [stopped], timeout: 2)
+        }
+    }
+
     func testStreamPropagatesConnectionFailure() async throws {
         let fixture = TransportFixture { loader in
             loader.respond(status: 200, bytes: Data("first\n".utf8), finish: false)

@@ -372,6 +372,10 @@ actor ClaudeMessagesSession: AgentSession {
                     body.append(contentsOf: (line + "\n").utf8.prefix(max(0, 16_384 - body.count)))
                     if body.count >= 16_384 { break }
                 }
+            } catch let error as URLError where error.code == .dataLengthExceedsMaximum {
+                // The bounded reader cancelled an oversized error body. The
+                // known HTTP status is still authoritative and safe to report.
+                try Task.checkCancellation()
             } catch { throw Self.transportError(error) }
             throw Self.mapHTTPError(status: status, body: body)
         }

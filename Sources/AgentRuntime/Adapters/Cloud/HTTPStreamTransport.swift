@@ -52,7 +52,7 @@ public struct URLSessionStreamTransport: HTTPStreamTransport {
             guard let http = response as? HTTPURLResponse else {
                 throw URLError(.badServerResponse)
             }
-            let reader = HTTPLineReader(bytes: bytes)
+            let reader = HTTPLineReader(bytes: bytes, status: http.statusCode)
             // Pull one line at a time. There is no detached producer holding the
             // continuation alive when the consumer stops at message_stop.
             let stream = AsyncThrowingStream<String, Error>(unfolding: {
@@ -91,15 +91,24 @@ private final class RejectRedirectsDelegate: NSObject, URLSessionTaskDelegate {
 /// Foundation's generic line conveniences are not the framing contract here.
 /// The reader owns the real data task until EOF, failure, or stream release.
 private actor HTTPLineReader {
+    // Bound wire bytes before appending or UTF-8 decoding. The event budget
+    // spans nonblank lines so many small `data:` lines cannot bypass it.
+    // Delimiters do not count; a blank line resets the event budget.
+    private static let maximumEventBytes = 1_048_576
+    private let maximumLineBytes: Int
     private var iterator: URLSession.AsyncBytes.Iterator?
     private let task: URLSessionDataTask
+    private var eventBytes = 0
     private var skipLineFeed = false
     private var firstLine = true
     private var finished = false
 
-    init(bytes: URLSession.AsyncBytes) {
+    init(bytes: URLSession.AsyncBytes, status: Int) {
         iterator = bytes.makeAsyncIterator()
         task = bytes.task
+        // Non-success bodies only need the adapter's 16 KiB error prefix.
+        // Apply that cap while reading, even if no newline ever arrives.
+        maximumLineBytes = status == 200 ? Self.maximumEventBytes : 16_384
     }
 
     deinit {
@@ -129,9 +138,16 @@ private actor HTTPLineReader {
                     }
                     if byte == 0x0A || byte == 0x0D {
                         skipLineFeed = byte == 0x0D
+                        if line.isEmpty { eventBytes = 0 }
                         return try decode(line)
                     }
+                    guard line.count < maximumLineBytes,
+                          eventBytes < Self.maximumEventBytes else {
+                        // No response text, request URL, or headers in errors.
+                        throw URLError(.dataLengthExceedsMaximum)
+                    }
                     line.append(byte)
+                    eventBytes += 1
                 }
                 finished = true
                 task.cancel()

@@ -181,7 +181,16 @@ and no key. This adapter-swap procedure is separate from the smoke test;
 general cloud chat requires its own usage authorization and has no one-request
 smoke-test bound.
 
-Live AF-80 acceptance remains unverified until the owner-run result is recorded.
+### Recorded acceptance — 2026-10-06
+
+At 18:33 UTC (11:33 PDT), Kenny confirmed live story streaming with
+`anthropic:claude-haiku-4-5` from the original checked-in manifest; the supplied
+output ended with `[5 turns remaining]`. The coordinating agent recorded this
+in [AF-80 comment 11331](https://infinitiqtech.atlassian.net/browse/AF-80?focusedCommentId=11331).
+This is owner-reported live acceptance, not an independently observed agent
+provider call or a result inferred from deterministic tests. It supersedes the
+earlier live-unverified status. Revision-specific automated results and their
+scope are recorded in the [feature log](../features/cloud-adapter/spec_log.md).
 Deterministic tests, dry runs, or an available local Foundation Models session
 do not satisfy that acceptance criterion. Physical-device airplane-mode
 acceptance remains separately tracked in
