@@ -119,6 +119,28 @@ struct ManifestBridgedTool: Tool {
     let engine: ToolExecutionEngine
     let relay: ToolEventRelay
 
+    /// The exact registration surface supplied to LanguageModelSession.
+    /// Kept independent of model availability so normalization is testable
+    /// without starting a generation or downloading a model.
+    static func makeTools(
+        toolbox: AgentToolbox,
+        engine: ToolExecutionEngine,
+        relay: ToolEventRelay
+    ) throws -> [ManifestBridgedTool] {
+        try toolbox.tools.map { definition in
+            ManifestBridgedTool(
+                name: definition.name,
+                description: definition.description,
+                parameters: try GenerationSchemaBuilder.makeSchema(
+                    toolName: definition.name,
+                    parameters: definition.parameters
+                ),
+                engine: engine,
+                relay: relay
+            )
+        }
+    }
+
     func call(arguments: GeneratedContent) async throws -> String {
         let args = Self.decodeArguments(arguments)
         let call = AgentToolCall(toolId: name, callId: UUID().uuidString, args: args)
@@ -358,22 +380,9 @@ actor FoundationModelsSession: AgentSession {
         let engine = ToolExecutionEngine(toolbox: toolbox, configuration: configuration)
         // Only normalized-allowed tools are ever registered with the model.
         // An agent with no tools configured registers zero tools.
-        var bridgedTools: [any Tool] = []
-        for definition in toolbox.tools {
-            let schema = try GenerationSchemaBuilder.makeSchema(
-                toolName: definition.name,
-                parameters: definition.parameters
-            )
-            bridgedTools.append(
-                ManifestBridgedTool(
-                    name: definition.name,
-                    description: definition.description,
-                    parameters: schema,
-                    engine: engine,
-                    relay: relay
-                )
-            )
-        }
+        let bridgedTools = try ManifestBridgedTool.makeTools(
+            toolbox: toolbox, engine: engine, relay: relay
+        )
 
         if let format = manifest.config.output?.format {
             _ = try format.validatedSchema()

@@ -5,14 +5,15 @@ import Foundation
 /// Normalization matches the control-plane sidecar
 /// (`LangchainAdaptorService/app/application/tools_manager.py`):
 /// - an explicit `allowed` list wins, even when empty;
-/// - `allowed` absent with definitions present exposes every definition;
+/// - `allowed` absent with definitions present exposes every defined name;
 /// - no `tools` section, or `allowed: []`, exposes zero tools;
-/// - `allowed` entries with no matching definition are ignored.
+/// - `allowed` entries with no matching definition are ignored;
+/// - duplicate names resolve to their last definition.
 ///
-/// Exposure order follows the manifest (`allowed` order when declared,
-/// otherwise `definitions` order); the exposed *set* is sidecar-identical.
+/// Names use exact Unicode spelling and Unicode scalar sort order, matching
+/// Python's string equality and ordering in the sidecar.
 public struct AgentToolbox: Sendable, Equatable {
-    /// Tools the model may see and call, in manifest order.
+    /// Tools the model may see and call, sorted by name in sidecar order.
     public let tools: [ToolDefinition]
     /// The manifest's tool policy, passed through for enforcement.
     public let policy: AgentToolPolicy?
@@ -22,7 +23,7 @@ public struct AgentToolbox: Sendable, Equatable {
     public var isEmpty: Bool { tools.isEmpty }
 
     public func definition(named name: String) -> ToolDefinition? {
-        tools.first { $0.name == name }
+        tools.first { $0.name.utf8.elementsEqual(name.utf8) }
     }
 
     /// Builds the normalized toolbox for a manifest. An agent with no tools
@@ -31,25 +32,17 @@ public struct AgentToolbox: Sendable, Equatable {
         let toolsConfig = config.tools
         let definitions = toolsConfig?.definitions ?? []
 
-        let allowedNames: Set<String>
-        if let allowed = toolsConfig?.allowed {
-            allowedNames = Set(allowed)
-        } else {
-            allowedNames = Set(definitions.map(\.name))
+        // Swift String equality folds canonically equivalent spellings;
+        // Python does not. UTF-8 keys preserve exact names, and their lexical
+        // order matches Unicode scalar order for valid strings.
+        var byName: [Data: ToolDefinition] = [:]
+        for definition in definitions {
+            byName[Data(definition.name.utf8)] = definition
         }
-
-        let ordered: [ToolDefinition]
-        if let allowed = toolsConfig?.allowed {
-            var byName: [String: ToolDefinition] = [:]
-            for definition in definitions { byName[definition.name] = definition }
-            var seen = Set<String>()
-            ordered = allowed.compactMap { name in
-                guard seen.insert(name).inserted else { return nil }
-                return byName[name]
-            }
-        } else {
-            ordered = definitions.filter { allowedNames.contains($0.name) }
-        }
+        let allowedNames = toolsConfig?.allowed.map { Set($0.map { Data($0.utf8) }) }
+            ?? Set(byName.keys)
+        let ordered = allowedNames.sorted { $0.lexicographicallyPrecedes($1) }
+            .compactMap { byName[$0] }
 
         return AgentToolbox(
             tools: ordered,

@@ -25,8 +25,8 @@ public struct URLSessionWebhookTransport: WebhookTransport {
     }
 }
 
-/// Executes `ToolDefinition.endpoint` webhooks, mirroring the sidecar's
-/// dynamic webhook tool behavior: arguments travel as a JSON body (or query
+/// Executes the Swift lane's `ToolDefinition.endpoint` webhooks:
+/// arguments travel as a JSON body (or query
 /// items for GET), static manifest headers are applied, and a 2xx status is
 /// success with the response body as the tool output.
 struct WebhookToolExecutor: Sendable {
@@ -65,7 +65,9 @@ struct WebhookToolExecutor: Sendable {
             request.setValue(value, forHTTPHeaderField: header)
         }
         if method != "GET" {
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if request.value(forHTTPHeaderField: "Content-Type") == nil {
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            }
             do {
                 request.httpBody = try JSONEncoder().encode(call.args)
             } catch {
