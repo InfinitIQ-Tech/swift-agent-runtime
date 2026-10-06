@@ -44,12 +44,12 @@ for try await event in await session.send("Tell me a story") {
 | `system_prompt` | Instructions from the loaded version snapshot on every adapter; later AgentFactory metadata edits do not mutate the session |
 | `runtime.streaming` | `start` → text-delta `chunk` frames → `end` when on; `start` → `end` when off (tool events may occur in either mode) |
 | `runtime.max_turns` | Typed `maxTurnsExceeded` once the session limit is reached |
-| `runtime.max_concurrent_tools` | Concurrent tool-execution width |
+| `runtime.max_concurrent_tools` | Shared tool-execution cap across overlapping batches on one engine |
 | `model.strategy` / `model.candidates` | `single` uses only the first candidate; `fallback` walks candidates until an adapter is available; unrecognized strategies retain ordered fallback |
 | `model.routing_policy.prefer_on_device` | Under fallback, `true` stably prioritizes exact `apple:foundation-models`; false/absent retains manifest order. Other routing metadata is preserved without changing selection |
-| `tools.allowed` / `tools.definitions` | Sidecar-parity allow-list normalization; only allowed tools are ever registered with a model. No tools configured → zero tools registered |
+| `tools.allowed` / `tools.definitions` | Sidecar-parity normalization: explicit allowed list wins; one last definition per exact name, in sorted name order. No tools configured → zero tools registered |
 | `tools.definitions[].endpoint` | Webhook execution over `URLSession` (method, headers) |
-| `tools.tool_policy` | `max_tools_per_turn`, `max_total_runtime_ms`, `require_user_confirmation` via a host confirmation hook |
+| `tools.tool_policy` | `max_tools_per_turn`, cumulative completed-runtime admission budget `max_total_runtime_ms`, and `require_user_confirmation` via a host hook. Already admitted work can exceed the time budget; uncooperative host handlers cannot be forcibly cancelled |
 | `output.format` (`json_schema`) | Per-turn structured output: guided generation on-device, `output_config` on the Messages API. The decoded payload arrives as `AgentTurnResult.structured` on the `end` frame — identical across adapters. Structured turns emit no `chunk` frames. Unknown format types or unsupported schemas fail session creation with typed errors; nested payload violations raise `structuredOutputInvalid` |
 | Session `prewarm()` | Foundation Models calls `LanguageModelSession.prewarm()` at conversation entry; cloud is a no-op with zero network requests |
 | `memory`, `retrieval`, `guardrails`, unknown sections | Pass-through: preserved on round-trip, never dropped |

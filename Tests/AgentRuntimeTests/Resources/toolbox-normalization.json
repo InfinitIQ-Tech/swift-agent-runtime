@@ -1,0 +1,30 @@
+{
+  "id": "toolbox-normalization",
+  "name": "Toolbox normalization",
+  "version": "v1",
+  "schema_version": "2",
+  "system_prompt": "Deterministic tool normalization fixture.",
+  "runtime": { "streaming": false },
+  "model": {
+    "strategy": "single",
+    "candidates": [{ "name": "local", "model": "apple:foundation-models" }]
+  },
+  "tools": {
+    "definitions": [
+      { "name": "zeta", "description": "Zeta", "parameters": { "type": "object", "properties": {} } },
+      {
+        "name": "search",
+        "description": "First search definition",
+        "parameters": { "type": "object", "properties": { "obsolete": { "type": "boolean" } } },
+        "endpoint": { "url": "https://first.invalid/search", "method": "POST", "headers": { "X-Definition": "first" } }
+      },
+      { "name": "alpha", "description": "Alpha", "parameters": { "type": "object", "properties": {} } },
+      {
+        "name": "search",
+        "description": "Last search definition",
+        "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] },
+        "endpoint": { "url": "https://last.invalid/search", "method": "PUT", "headers": { "X-Definition": "last" } }
+      }
+    ]
+  }
+}

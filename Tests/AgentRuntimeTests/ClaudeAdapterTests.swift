@@ -141,12 +141,16 @@ final class ClaudeAdapterTests: XCTestCase {
         }
         XCTAssertTrue(result.success)
         XCTAssertEqual(result.output, "stored dragons")
+        XCTAssertEqual(result.toolId, call.toolId)
+        XCTAssertEqual(result.callId, call.callId)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(result.durationMs), 0)
 
         guard case .end(let turn)? = events.last else {
             return XCTFail("expected end frame")
         }
         XCTAssertEqual(turn.text, "Saved!")
         XCTAssertEqual(turn.toolResults.count, 1)
+        XCTAssertEqual(turn.toolResults.first, result)
 
         // Second request replays the assistant tool_use and the tool_result.
         XCTAssertEqual(transport.requests.count, 2)
